@@ -1,0 +1,1153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Designing Systems That Move Money</title>
+<meta name="description" content="A source-graded review of the system architecture and design trade-offs behind money-moving systems at 24 fintechs, banks and platforms, for principal engineers and architects.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="report.css">
+</head>
+<body>
+<main class="page">
+
+<header class="cover">
+  <p class="kicker">System design research report</p>
+  <h1>Designing Systems That Move Money</h1>
+  <p class="subtitle">Design trade-offs from 24 fintechs, banks and platforms, for principal engineers and architects</p>
+  <p class="byline">Marisha Sahay · November 2026 (draft) · v0.3</p>
+  <p class="links screen-only"><a href="fintech-stack-report.pdf">Download PDF</a> · <a href="sources.html">All 412 sources</a></p>
+  <nav class="toc" aria-label="Contents"><h2 class="toc-title">Contents</h2><ol><li><a href="#key-findings">Key findings</a></li>
+<li><a href="#scope-and-method">Scope and method</a></li>
+<li><a href="#the-reference-architecture">The reference architecture</a></li>
+<li><a href="#architecture-profiles">Architecture profiles</a></li>
+<li><a href="#topology-and-resilience">Topology and resilience</a></li>
+<li><a href="#languages-and-frameworks">Languages and frameworks</a></li>
+<li><a href="#the-design-matrix">The design matrix</a></li>
+<li><a href="#decision-1-how-to-record-money">Decision 1: How to record money</a></li>
+<li><a href="#decision-2-where-atomicity-lives">Decision 2: Where atomicity lives</a></li>
+<li><a href="#decision-3-partitioning-and-scaling-the-store">Decision 3: Partitioning and scaling the store</a></li>
+<li><a href="#decision-4-the-data-access-layer">Decision 4: The data access layer</a></li>
+<li><a href="#decision-5-service-and-event-boundaries">Decision 5: Service and event boundaries</a></li>
+<li><a href="#decision-6-how-to-know-the-money-is-right">Decision 6: How to know the money is right</a></li>
+<li><a href="#migrating-a-live-money-system">Migrating a live money system</a></li>
+<li><a href="#heuristics-for-architects">Heuristics for architects</a></li>
+<li><a href="#limitations">Limitations</a></li><li><a href="#references">References</a></li></ol></nav>
+</header>
+<section class="report-section" data-source="01-executive-summary.md">
+<h2 id="key-findings">Key findings</h2>
+<p>This report reviews the architecture and design of the systems that move money at 24 fintechs, banks and platforms, using only what they have published themselves. It is written for principal engineers and architects. Part I covers system architecture. Part II covers the design decisions inside it: the options companies took, what each bought, and what it cost.</p>
+<h3 id="architecture">Architecture</h3>
+<ol>
+<li><p><strong>Very different stacks converge on eight components, and only one of them owns money.</strong> Edge, orchestration, rail gateways, ledger, balance store, event backbone, reconciliation and data platform appear across the sample. Balances, events and warehouse tables are all derived from the ledger. Uber names exactly two sources of truth: &quot;the money order store and the entity balance store&quot; <sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>, <a href="#ref-stripe-ledger-2024">2</a>]</sup>.</p>
+</li>
+<li><p><strong>The network edge stays physical.</strong> Cloud-first banks still run their own data centers for card scheme and bank rail connections: Monzo, Starling, Wise and Nubank. Nubank authorizes cards without any cloud round trip <sup class="cite">[<a href="#ref-monzo-thousands-microservices-2023">3</a>, <a href="#ref-starling-card-processor-2022">4</a>, <a href="#ref-wise-tech-stack-2025">5</a>, <a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>.</p>
+</li>
+<li><p><strong>The strongest isolation partitions whole stacks, not databases.</strong> Ant Group routes users to units at the network entry, across three regions and five data centers, with a stated RPO of 0. Nubank clones its entire infrastructure per customer partition. Shopify forbids any action that crosses pods <sup class="cite">[<a href="#ref-ant-group-fingrade-arch-2026">7</a>, <a href="#ref-nubank-architecture-qcon-2017">6</a>, <a href="#ref-shopify-pods-2018">8</a>]</sup>.</p>
+</li>
+<li><p><strong>Regional failure is designed for, and tested by reality.</strong> In the October 2025 us-east-1 outage, Cash App kept running from us-west-2, while Square&#39;s European sellers saw up to 30% of transactions fail. Capital One removed database failover entirely, and Monzo keeps a separately written standby bank on a second cloud <sup class="cite">[<a href="#ref-block-resilience-2025">9</a>, <a href="#ref-capital-one-dynamodb-resiliency-2021">10</a>, <a href="#ref-monzo-stand-in-2025">11</a>]</sup>.</p>
+</li>
+</ol>
+<h3 id="design-decisions">Design decisions</h3>
+<ol start="5">
+<li><p><strong>Money is stored as entries, never as an overwritten balance.</strong> The open questions are where the zero-sum invariant runs, how to keep balance reads fast, and how to handle hot accounts. Uber batches writes to hot accounts for a 10x gain, and Ant built a separate store for them <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>, <a href="#ref-monzo-balance-read-time-2023">12</a>, <a href="#ref-uber-high-throughput-2026">13</a>, <a href="#ref-ant-group-maxwell-2021">14</a>]</sup>.</p>
+</li>
+<li><p><strong>Atomicity is kept local.</strong> No company lets a money transaction span shards under two-phase commit. Cash App keeps each one on a single customer&#39;s shard, Starling inside one service&#39;s database, and Monzo gives up transactions and repairs afterwards <sup class="cite">[<a href="#ref-block-sharding-cash-2018">15</a>, <a href="#ref-starling-cloud-bank-slides-2018">16</a>, <a href="#ref-monzo-thousands-microservices-2023">3</a>]</sup>.</p>
+</li>
+<li><p><strong>A narrow data access layer is what makes the database replaceable.</strong> Klarna swapped Mnesia for PostgreSQL under its own access layer with no downtime. Stripe exposes only &quot;a minimal battle-tested set of functions&quot;. ORMs survive scale when sharding happens beneath them <sup class="cite">[<a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>, <a href="#ref-stripe-docdb-qcon-2025">18</a>, <a href="#ref-block-sharding-cash-2018">15</a>]</sup>.</p>
+</li>
+<li><p><strong>Service counts vary more than 100x, from about 30 at Starling to more than 4,000 at Nubank.</strong> The rule that holds everywhere is one database per service or module <sup class="cite">[<a href="#ref-starling-rampant-pragmatism-2020">19</a>, <a href="#ref-nubank-cloud-limits-2025">20</a>, <a href="#ref-klarna-modular-monolith-2025">21</a>]</sup>.</p>
+</li>
+<li><p><strong>Correctness is three layers, and the last one is a number.</strong> Invariants stop bad writes, idempotency makes retries safe, and reconciliation measures the result. Stripe reports over 99.9999% explainability of money movement <sup class="cite">[<a href="#ref-adyen-design-duty-accounting-2021">22</a>, <a href="#ref-airbnb-orpheus-2019">23</a>, <a href="#ref-stripe-ledger-2024">2</a>]</sup>.</p>
+</li>
+</ol>
+
+</section>
+<section class="report-section" data-source="02-scope-and-method.md">
+<h2 id="scope-and-method">Scope and method</h2>
+<p>The sample is 24 companies that move money at scale: payment processors, neobanks, consumer fintechs, five banks, and four platforms that run their own payment systems. Zalando, an online retailer, is included as a reference case for one data access pattern. Companies were chosen for size and for how much they publish about their engineering, which biases the sample (see Limitations).</p>
+<p>The report has two parts. <strong>Part I</strong> covers system architecture: a reference architecture built from what these companies publish, profiles of the best-documented systems, how they are deployed for scale and resilience, and the languages and frameworks they are built in. <strong>Part II</strong> covers the six design decisions inside that architecture, from how money is recorded to how it is verified, followed by how companies migrated live systems and a set of design heuristics. Vendor selection, build-versus-buy, front-end stacks, analytics and security tooling are out of scope.</p>
+<h3 id="how-sources-were-graded">How sources were graded</h3>
+<p>Every claim rests on a source that was opened and read, not on a search result. Each source carries one of three grades:</p>
+<ul>
+<li><strong>Strong:</strong> the company&#39;s own engineering blog, conference talk, documentation, open-source code, or regulatory filing.</li>
+<li><strong>Medium:</strong> the company&#39;s job listings, or material the company took part in, such as a vendor case study. These are labeled in the text wherever they carry a claim.</li>
+<li><strong>Weak:</strong> third-party coverage. Used only to find stronger sources. No claim here rests on a Weak source alone.</li>
+</ul>
+<p>In total, 412 sources were consulted. 303 of them are Strong, and 386 were read in full or in the relevant part. The <a href="sources.html">sources page</a> lists every one, with its grade, its date, and whether it was read. Any source older than five years carries its year in the text, because designs change.</p>
+<!-- Decision for the author: disclose AI-assisted research. Suggested wording:
+"Source discovery and first-pass reading were done with AI research assistants. Every cited source was opened and read, and its grade and date were recorded in a per-company research note. Those notes are public in the report's repository." -->
+
+</section>
+<section class="report-section" data-source="03-reference-architecture.md">
+<h2 id="the-reference-architecture">The reference architecture</h2>
+<div class="finding">
+
+<p><strong>Behind very different stacks, the companies in this sample converge on the same eight components.</strong> They differ in which component holds the truth, which ones are synchronous, and where the hard boundaries sit. This section maps the components. Part II covers the decisions inside them.</p>
+</div>
+
+<div class="diagram">
+<svg viewBox="0 0 760 486" role="img" aria-labelledby="ra-title ra-desc" xmlns="http://www.w3.org/2000/svg">
+<title id="ra-title">Reference architecture of a system that moves money</title>
+<desc id="ra-desc">Requests flow from clients through an edge layer to payment orchestration. Orchestration writes to an append-only ledger and calls rail gateways that connect to external networks. The ledger feeds a derived balance store and an event backbone. The backbone feeds reconciliation and the data platform. Reconciliation also receives settlement files from external networks. A platform layer runs underneath everything.</desc>
+<defs><marker id="ra-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker></defs>
+<rect x="20" y="16" width="220" height="50" rx="8" class="dg-ext"/>
+<text x="130" y="38" text-anchor="middle" class="dg-title">Clients and partner APIs</text>
+<text x="130" y="55" text-anchor="middle" class="dg-sub">apps, merchants, card terminals</text>
+<rect x="520" y="16" width="220" height="50" rx="8" class="dg-ext"/>
+<text x="630" y="38" text-anchor="middle" class="dg-title">External networks</text>
+<text x="630" y="55" text-anchor="middle" class="dg-sub">card schemes, bank rails, processors</text>
+<rect x="20" y="100" width="220" height="56" rx="8" class="dg-box"/>
+<text x="130" y="123" text-anchor="middle" class="dg-title">1. Edge and API</text>
+<text x="130" y="141" text-anchor="middle" class="dg-sub">auth, rate limits, idempotency keys</text>
+<rect x="20" y="190" width="220" height="56" rx="8" class="dg-box"/>
+<text x="130" y="213" text-anchor="middle" class="dg-title">2. Payment orchestration</text>
+<text x="130" y="231" text-anchor="middle" class="dg-sub">workflows, steps saved before running</text>
+<rect x="290" y="190" width="200" height="56" rx="8" class="dg-box"/>
+<text x="390" y="213" text-anchor="middle" class="dg-title">3. Rail gateways</text>
+<text x="390" y="231" text-anchor="middle" class="dg-sub">one adapter per network</text>
+<rect x="20" y="280" width="220" height="56" rx="8" class="dg-box dg-core"/>
+<text x="130" y="303" text-anchor="middle" class="dg-title">4. Ledger (system of record)</text>
+<text x="130" y="321" text-anchor="middle" class="dg-sub">append-only, double-entry</text>
+<rect x="290" y="280" width="200" height="56" rx="8" class="dg-box"/>
+<text x="390" y="303" text-anchor="middle" class="dg-title">5. Balance store</text>
+<text x="390" y="321" text-anchor="middle" class="dg-sub">derived, read-optimized</text>
+<rect x="20" y="372" width="470" height="44" rx="8" class="dg-box"/>
+<text x="255" y="392" text-anchor="middle" class="dg-title">6. Event backbone</text>
+<text x="255" y="408" text-anchor="middle" class="dg-sub">Kafka, Kinesis, or the database itself (outbox, event store)</text>
+<rect x="520" y="280" width="220" height="56" rx="8" class="dg-box dg-core"/>
+<text x="630" y="303" text-anchor="middle" class="dg-title">7. Reconciliation and audit</text>
+<text x="630" y="321" text-anchor="middle" class="dg-sub">invariants, explainability, alerts</text>
+<rect x="520" y="372" width="220" height="44" rx="8" class="dg-box"/>
+<text x="630" y="392" text-anchor="middle" class="dg-title">8. Data platform</text>
+<text x="630" y="408" text-anchor="middle" class="dg-sub">change data capture, warehouse</text>
+<rect x="20" y="440" width="720" height="32" rx="8" class="dg-box"/>
+<text x="380" y="461" text-anchor="middle" class="dg-sub">Platform: service chassis and shared libraries, RPC, Kubernetes, monorepo, one database per service</text>
+<line x1="130" y1="66" x2="130" y2="98" class="dg-line" marker-end="url(#ra-arrow)"/>
+<line x1="130" y1="156" x2="130" y2="188" class="dg-line" marker-end="url(#ra-arrow)"/>
+<line x1="240" y1="218" x2="288" y2="218" class="dg-line" marker-end="url(#ra-arrow)"/>
+<path d="M490,218 L630,218 L630,68" class="dg-line" marker-end="url(#ra-arrow)"/>
+<line x1="130" y1="246" x2="130" y2="278" class="dg-line" marker-end="url(#ra-arrow)"/>
+<line x1="240" y1="308" x2="288" y2="308" class="dg-line" marker-end="url(#ra-arrow)"/>
+<line x1="130" y1="336" x2="130" y2="370" class="dg-line" marker-end="url(#ra-arrow)"/>
+<path d="M490,394 L505,394 L505,320 L518,320" class="dg-line" marker-end="url(#ra-arrow)"/>
+<line x1="490" y1="402" x2="518" y2="402" class="dg-line" marker-end="url(#ra-arrow)"/>
+<path d="M700,66 L700,278" class="dg-line" marker-end="url(#ra-arrow)"/>
+<text x="706" y="176" class="dg-label">settlement</text>
+<text x="706" y="189" class="dg-label">files</text>
+<text x="250" y="210" class="dg-label">calls</text>
+<text x="138" y="268" class="dg-label">writes entries</text>
+<text x="248" y="300" class="dg-label">derives</text>
+</svg>
+<p class="caption">Figure 1. The components shared across the sample. Bold outlines mark the two components that hold or verify the truth about money. Dashed boxes are outside the system.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Job</th>
+<th>Where it is documented</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>1. Edge and API</strong></td>
+<td>Authenticate, rate-limit, and attach an idempotency key to every request that can move money</td>
+<td>Adyen stores API idempotency keys in CockroachDB <sup class="cite">[<a href="#ref-adyen-design-duty-architecture-2021">24</a>]</sup>; Airbnb&#39;s Billing Interface API fronts payments <sup class="cite">[<a href="#ref-airbnb-payments-platform-2016">25</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>2. Payment orchestration</strong></td>
+<td>Run multi-step flows, save each step before running it, and resume after failure</td>
+<td>Uber runs in-session payment flows on its Cadence workflow engine <sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>]</sup>; Starling stores each step before processing it <sup class="cite">[<a href="#ref-starling-cloud-bank-java-2018">26</a>]</sup>; Revolut has a dedicated &quot;flow services&quot; type <sup class="cite">[<a href="#ref-revolut-qcon-architecture-2025">27</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>3. Rail gateways</strong></td>
+<td>Translate internal payments into each external network&#39;s protocol</td>
+<td>Monzo built its own Faster Payments gateway and runs it in its own data centres <sup class="cite">[<a href="#ref-monzo-faster-payments-gateway-2020">28</a>]</sup>; Airbnb has a Payments Gateway in front of processors <sup class="cite">[<a href="#ref-airbnb-payments-platform-2016">25</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>4. Ledger</strong></td>
+<td>Record every movement as immutable, balanced entries</td>
+<td>Stripe&#39;s Ledger <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>]</sup>, Uber&#39;s LedgerStore <sup class="cite">[<a href="#ref-uber-ledgerstore-indexes-2024">29</a>]</sup>, Square&#39;s Books <sup class="cite">[<a href="#ref-block-books-ledger-2019">30</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>5. Balance store</strong></td>
+<td>Serve current balances fast, derived from the ledger</td>
+<td>Uber&#39;s User Account Store holds authoritative balances <sup class="cite">[<a href="#ref-uber-high-throughput-2026">13</a>]</sup>; Monzo precomputes balance blocks <sup class="cite">[<a href="#ref-monzo-balance-read-time-2023">12</a>]</sup>; Nubank syncs authorizer balances through Kafka <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>6. Event backbone</strong></td>
+<td>Carry state changes to everything downstream</td>
+<td>Kafka at Nubank, PayPal and Wise <sup class="cite">[<a href="#ref-nubank-cloud-limits-2025">20</a>, <a href="#ref-paypal-kafka-2023">31</a>, <a href="#ref-wise-tech-stack-2025">5</a>]</sup>; Kinesis at Chime <sup class="cite">[<a href="#ref-chime-event-bus-2022">32</a>]</sup>; PostgreSQL at Revolut <sup class="cite">[<a href="#ref-revolut-qcon-architecture-2025">27</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>7. Reconciliation and audit</strong></td>
+<td>Prove that internal records match each other and the outside world</td>
+<td>Uber&#39;s audit framework <sup class="cite">[<a href="#ref-uber-audit-framework-2023">33</a>]</sup>; Airbnb&#39;s integrity pipeline <sup class="cite">[<a href="#ref-airbnb-transactional-integrity-2018">34</a>]</sup>; Coinbase&#39;s Overseer <sup class="cite">[<a href="#ref-coinbase-overseer-reconciliation-2022">35</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>8. Data platform</strong></td>
+<td>Copy online data out without loading the online databases</td>
+<td>Shopify streams binlogs from 100+ MySQL shards with Debezium <sup class="cite">[<a href="#ref-shopify-cdc-2021">36</a>]</sup>; Stripe streams DocDB changes to Kafka and S3 <sup class="cite">[<a href="#ref-stripe-docdb-2024">37</a>]</sup>; Monzo runs reconciliation models in its warehouse <sup class="cite">[<a href="#ref-monzo-payments-safely-2022">38</a>]</sup></td>
+</tr>
+</tbody></table>
+<h3 id="three-things-the-model-shows">Three things the model shows</h3>
+<p><strong>The ledger is the only component that owns money.</strong> Balances, events and warehouse tables are all derived from it, and can be rebuilt. That is why the companies with the most mature systems put their strongest guarantees in the ledger and accept looser ones elsewhere. Robinhood, for example, lets balances lag the ledger until end of day <sup class="cite">[<a href="#ref-robinhood-clearing-accounting-2022">39</a>]</sup>.</p>
+<p><strong>The money path is short, and the rest is asynchronous.</strong> Only the edge, orchestration, ledger and gateway sit on the request path. Uber states the split directly: synchronous, in-session flows run on Cadence, and Kafka carries the rest asynchronously <sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>]</sup>.</p>
+<p><strong>Verification is a component, not a test suite.</strong> Reconciliation has its own pipeline, data feeds and alerts at Uber, Airbnb, Stripe and Coinbase. It reads settlement files from outside the system, not only internal records <sup class="cite">[<a href="#ref-airbnb-transactional-integrity-2018">34</a>, <a href="#ref-stripe-ledger-2024">2</a>]</sup>.</p>
+
+</section>
+<section class="report-section" data-source="04-architecture-profiles.md">
+<h2 id="architecture-profiles">Architecture profiles</h2>
+<p>Thirteen companies publish enough to sketch their architecture end to end. Each profile gives the money path, the deployment topology, and the one choice that defines the design. Arrows mark the order a payment passes through components.</p>
+<h3 id="payment-platforms">Payment platforms</h3>
+<p><strong>Stripe.</strong> <em>Money path:</em> payments API → edge checks (rate limiters, idempotency keys and API versioning, described 2017 to 2020) → internal services through Stripe&#39;s own mesh proxy → DocDB → card networks. Ledger checks money movement after the fact instead of sitting on the request path <sup class="cite">[<a href="#ref-stripe-payments-api-2020">40</a>, <a href="#ref-stripe-rate-limiters-2017">41</a>, <a href="#ref-stripe-idempotency-2017">42</a>, <a href="#ref-stripe-mesh-proxy-2026">43</a>, <a href="#ref-stripe-ledger-2024">2</a>]</sup>. <em>Topology:</em> AWS, with DocDB replica sets spread across availability zones and regions <sup class="cite">[<a href="#ref-stripe-docdb-qcon-2025">18</a>]</sup>. <em>Defining choice:</em> a verifying ledger off the hot path. &quot;Ledger is our system of record and must remain an evergreen representation of truth&quot; <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>]</sup>.</p>
+<p><strong>Adyen.</strong> <em>Money path:</em> stateless edge services → the payment processing layer, which calls risk, recurring and routing services before the payment goes out to the schemes → a local PostgreSQL queue → round-robin accounting clusters → streams to reporting <sup class="cite">[<a href="#ref-adyen-design-duty-architecture-2021">24</a>, <a href="#ref-adyen-design-duty-accounting-2021">22</a>]</sup>. <em>Topology:</em> its own data centers in Europe, the US, India, Singapore, Japan and Australia, accepting payments at several locations at once, with no public cloud for payment processing <sup class="cite">[<a href="#ref-adyen-infrastructure-2026">44</a>]</sup>. <em>Defining choice:</em> a stateless, write-restricted edge. &quot;All our externally exposed systems are prohibited from writing to central databases&quot; (2021) <sup class="cite">[<a href="#ref-adyen-design-duty-architecture-2021">24</a>]</sup>.</p>
+<p><strong>Block (Cash App).</strong> <em>Money path:</em> Temporal workflows on every money transfer → each payment split into per-customer movements → Vitess routes each to its customer&#39;s MySQL shard → the Ledgering team&#39;s systems record it <sup class="cite">[<a href="#ref-block-temporal-cashapp-2024">45</a>, <a href="#ref-block-remodeling-payments-2018">46</a>, <a href="#ref-block-job-ledgering-2026">47</a>]</sup>. <em>Topology:</em> Cash App runs across availability zones in us-west-2, chosen &quot;for its stability and low failure correlation&quot;. Square runs active in several AWS regions and shifts traffic between them regularly <sup class="cite">[<a href="#ref-block-resilience-2025">9</a>]</sup>. <em>Defining choice:</em> consistency over availability. &quot;We will never compromise data consistency in exchange for availability&quot; (2018) <sup class="cite">[<a href="#ref-block-sharding-cash-2018">15</a>]</sup>.</p>
+<p><strong>Uber.</strong> <em>Money path:</em> order insertion service → immutable order store and Kafka → order processing service → User Account Store, with hot accounts batched → entity changelog and LedgerStore → a payment integration interface → external providers <sup class="cite">[<a href="#ref-uber-gulfstream-2020">48</a>, <a href="#ref-uber-high-throughput-2026">13</a>, <a href="#ref-uber-zero-sum-2026">1</a>]</sup>. <em>Topology:</em> active-active across regions as a stated goal (2018 and 2020), with standby cross-region consumers and balance storage on a multi-zone quorum. LedgerStore runs in Uber&#39;s own data centers <sup class="cite">[<a href="#ref-uber-gulfstream-2020">48</a>, <a href="#ref-uber-ledgerstore-migration-2024">49</a>]</sup>. <em>Defining choice:</em> two named sources of truth. &quot;The two shared sources of truth across all services are the money order store and the entity balance store&quot; <sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>]</sup>.</p>
+<p><strong>Airbnb.</strong> <em>Money path:</em> billing and pricing APIs → payment orchestration as a graph of idempotent steps over Kafka, using Orpheus → a processing gateway with a connector per processor. The ledger and reconciliation sit beside the path <sup class="cite">[<a href="#ref-airbnb-payment-orchestration-2022">50</a>, <a href="#ref-airbnb-payments-platform-2016">25</a>]</sup>. <em>Topology:</em> AWS, with several processors integrated &quot;to achieve global coverage and payments redundancy&quot; (2018) <sup class="cite">[<a href="#ref-airbnb-transactional-integrity-2018">34</a>]</sup>. <em>Defining choice:</em> &quot;Every major workflow is divided into a directed acyclic graph (DAG) of retryable idempotent steps, each with well-defined behavior&quot; <sup class="cite">[<a href="#ref-airbnb-payment-orchestration-2022">50</a>]</sup>.</p>
+<p><strong>Shopify.</strong> <em>Money path:</em> card fields in an iframe → CardSink, which encrypts and tokenizes the card → checkout in the Rails monolith and a background job → CardServer and a processor adapter → acquirer, network and issuer <sup class="cite">[<a href="#ref-shopify-flash-sale-talk-2022">51</a>]</sup>. <em>Topology:</em> shops grouped into pods with fully isolated datastores (2018). Each pod is active in one region and replicated to a second, and a whole pod can fail over <sup class="cite">[<a href="#ref-shopify-pods-2018">8</a>, <a href="#ref-shopify-flash-sale-talk-2022">51</a>]</sup>. <em>Defining choice:</em> keeping card data away from the monolith. &quot;We just don&#39;t let it see any card data in the first place&quot; <sup class="cite">[<a href="#ref-shopify-flash-sale-talk-2022">51</a>]</sup>.</p>
+<h3 id="neobanks-and-consumer-fintech">Neobanks and consumer fintech</h3>
+<p><strong>Monzo.</strong> <em>Money path:</em> Mastercard → Monzo&#39;s own data centres → edge services on AWS → a Go card processor that calls account, financial crime and ledger services → the ledger → asynchronous events → daily reconciliation <sup class="cite">[<a href="#ref-monzo-thousands-microservices-2023">3</a>, <a href="#ref-monzo-payments-safely-2022">38</a>]</sup>. <em>Topology:</em> AWS across availability zones, a few owned data centres for scheme connections, and Stand-in, a separately written backup bank of 18 services on Google Cloud <sup class="cite">[<a href="#ref-monzo-stand-in-2025">11</a>]</sup>. <em>Defining choice:</em> a thin physical edge. &quot;We run the absolute minimum compute possible to interface messages with our core platform&quot; <sup class="cite">[<a href="#ref-monzo-thousands-microservices-2023">3</a>]</sup>.</p>
+<p><strong>Nubank.</strong> <em>Money path (2017):</em> Mastercard → router → authorizer in Nubank&#39;s own data centers, with HSMs and fraud checks → Kafka to AWS → the customer&#39;s shard → double-entry service → balances back to the authorizers <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>. <em>Topology:</em> AWS, where each shard is a full copy of the infrastructure, plus a global section for cross-shard work. Authorization runs active-active in owned data centers <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>. <em>Defining choice:</em> authorization that does not depend on the cloud. &quot;We don&#39;t need any cloud communication in order to authorize the transaction, that was important&quot; <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>.</p>
+<p><strong>Revolut.</strong> <em>Money path:</em> card network → card payments processor → card payment engine → Core Ledger and other core services → event store → financial crime and notification services <sup class="cite">[<a href="#ref-revolut-xt25-slides-2025">52</a>]</sup>. <em>Topology:</em> Google Cloud and Kubernetes, with four availability tiers from 99.5% to 99.99%, and an availability tier required for every component <sup class="cite">[<a href="#ref-revolut-devops-qcon-2025">53</a>]</sup>. <em>Defining choice:</em> fixed service types (frontend, flow and state). &quot;Every service would have its own type predefined&quot; <sup class="cite">[<a href="#ref-revolut-qcon-architecture-2025">27</a>]</sup>.</p>
+<p><strong>Starling.</strong> <em>Money path (2018):</em> app → customer service stores the instruction and reduces the balance → payment service sends to Faster Payments → bank service records it in the ledger. Each step is keyed by an ID, stored first, and retried <sup class="cite">[<a href="#ref-starling-cloud-bank-java-2018">26</a>]</sup>. <em>Topology:</em> AWS from the start, with at least two instances of every service. Owned UK data centres hold the payment hardware and connect to AWS over Direct Connect. Engine now runs on Google Cloud and AWS <sup class="cite">[<a href="#ref-starling-cloud-bank-slides-2018">16</a>, <a href="#ref-starling-card-processor-2022">4</a>, <a href="#ref-starling-engine-gcp-job-2026">54</a>]</sup>. <em>Defining choice:</em> the database as a work queue. &quot;The database becomes the repository of what work must be done&quot; <sup class="cite">[<a href="#ref-starling-cloud-bank-java-2018">26</a>]</sup>.</p>
+<p><strong>Wise.</strong> <em>Money path:</em> quote → transfer → pay-in → ledgers → payouts run as tasks → direct connections to local schemes such as InstaPay, Zengin and PIX <sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>, <a href="#ref-wise-tw-tasks-executor-2025">55</a>, <a href="#ref-wise-vendor-switching-2026">56</a>]</sup>. <em>Topology:</em> AWS with centralized networking and more than 20 Kubernetes clusters, plus physical data centres in the UK, Hungary and Australia for scheme connections <sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>]</sup>. <em>Defining choice:</em> side effects that run only after the business transaction commits. Tasks execute &quot;only when business logic is successfully committed&quot; <sup class="cite">[<a href="#ref-wise-tw-tasks-executor-2025">55</a>]</sup>.</p>
+<h3 id="large-scale-and-banks">Large scale and banks</h3>
+<p><strong>Ant Group.</strong> <em>Money path:</em> request routed by user ID at the network entry to its unit → transaction service → payment service → accounting service, all in one TCC transaction → OceanBase <sup class="cite">[<a href="#ref-ant-group-unitization-2026">57</a>, <a href="#ref-ant-group-seata-tcc-2019">58</a>, <a href="#ref-ant-group-oceanbase-history-2025">59</a>]</sup>. <em>Topology:</em> units spread across three regions and five data centers, with a stated RPO of 0 and RTO under 30 seconds, and a Kubernetes cluster per unit <sup class="cite">[<a href="#ref-ant-group-fingrade-arch-2026">7</a>, <a href="#ref-ant-group-unitization-2026">57</a>]</sup>. <em>Defining choice:</em> &quot;The core idea of unitization is to shard user requests at the network entry point, not just at the data layer&quot; <sup class="cite">[<a href="#ref-ant-group-unitization-2026">57</a>]</sup>.</p>
+<p><strong>Capital One.</strong> <em>Money path:</em> card processing at an external processor <sup class="cite">[<a href="#ref-capital-one-10k-2023">60</a>]</sup>. Transaction reads go from the mainframe through Lambda to a read-only DynamoDB store (2017) <sup class="cite">[<a href="#ref-capital-one-serverless-transactions-2017">61</a>]</sup>. <em>Topology:</em> all AWS since 2020, chosen because &quot;If one region were to go down, we can stand up in another region on AWS&quot; <sup class="cite">[<a href="#ref-capital-one-cloud-migration-2024">62</a>]</sup>. The virtual card number service runs active-active across East and West regions on DynamoDB global tables (2021) <sup class="cite">[<a href="#ref-capital-one-dynamodb-resiliency-2021">10</a>]</sup>. <em>Defining choice:</em> no database failover. &quot;The application writes to the database in its region and the data is replicated by AWS keeping the regions in sync&quot; <sup class="cite">[<a href="#ref-capital-one-dynamodb-resiliency-2021">10</a>]</sup>.</p>
+
+</section>
+<section class="report-section" data-source="05-topology-and-resilience.md">
+<h2 id="topology-and-resilience">Topology and resilience</h2>
+<div class="finding">
+
+<p><strong>Cloud-first companies still keep the connection to the payment networks on hardware they own, and the most resilient designs isolate whole stacks, not just databases.</strong> Recovery targets are almost never published. The best evidence of resilience in this sample comes from one real regional outage.</p>
+</div>
+
+<h3 id="the-network-edge-stays-physical">The network edge stays physical</h3>
+<p>Card schemes and bank rails connect through hardware security modules and scheme devices, so even cloud-native banks run a small physical tier:</p>
+<ul>
+<li>Monzo runs &quot;a few data centers to integrate with some of the payment schemes&quot;, and keeps them minimal on purpose <sup class="cite">[<a href="#ref-monzo-thousands-microservices-2023">3</a>]</sup>.</li>
+<li>Starling runs &quot;multiple data centers across UK, and multiple MIP devices and multiple HSMs for redundancy&quot;, connected to AWS <sup class="cite">[<a href="#ref-starling-card-processor-2022">4</a>]</sup>.</li>
+<li>Wise integrates with physical data centres in the UK, Hungary and Australia, and was an early user of AWS Outposts there <sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>]</sup>.</li>
+<li>Nubank&#39;s card authorizer (2017) runs on physical servers alongside the Mastercard devices, in several live data centers, so that authorization needs no cloud round trip <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>.</li>
+</ul>
+<p>Adyen goes furthest: all its main systems run in its own data centers on several continents, with no public cloud for payment processing <sup class="cite">[<a href="#ref-adyen-infrastructure-2026">44</a>]</sup>.</p>
+<h3 id="cells-partition-the-whole-stack">Cells: partition the whole stack</h3>
+<table>
+<thead>
+<tr>
+<th>Design</th>
+<th>Unit of isolation</th>
+<th>What crosses units</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Ant Group &quot;unitization&quot;</td>
+<td>A data center serving a range of user IDs, routed at the network entry</td>
+<td>Calls that cross data centers are kept to a minimum</td>
+<td><sup class="cite">[<a href="#ref-ant-group-unitization-2026">57</a>]</sup></td>
+</tr>
+<tr>
+<td>Nubank shards (2017)</td>
+<td>A full copy of the infrastructure per customer partition</td>
+<td>A global section of unsharded services, such as transfers between customers</td>
+<td><sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup></td>
+</tr>
+<tr>
+<td>Shopify pods (2018)</td>
+<td>A set of shops on fully isolated datastores</td>
+<td>Nothing: &quot;we don&#39;t allow any actions to reach across pods&quot;</td>
+<td><sup class="cite">[<a href="#ref-shopify-pods-2018">8</a>]</sup></td>
+</tr>
+</tbody></table>
+<p>The common idea is that the partition key chosen for the database (Decision 3) is also used to route traffic and deploy infrastructure. Ant states it directly: the approach &quot;treats each data center as a massive, stateful database shard&quot; <sup class="cite">[<a href="#ref-ant-group-unitization-2026">57</a>]</sup>. The cost is a separate path for anything that spans units. Nubank needs a global section, and Shopify forbids cross-pod actions outright.</p>
+<h3 id="active-active-active-passive-and-an-independent-standby">Active-active, active-passive, and an independent standby</h3>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Who</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Active-active across regions or sites</td>
+<td>Ant Group, Adyen, Square, Capital One (virtual cards), Nubank (authorization)</td>
+<td>Ant states RPO 0 and RTO under 30 seconds across three regions and five data centers</td>
+</tr>
+<tr>
+<td>Active in one region, replicated to another</td>
+<td>Shopify (per pod)</td>
+<td>A whole pod fails over to its second region</td>
+</tr>
+<tr>
+<td>Independent standby platform</td>
+<td>Monzo (Stand-in)</td>
+<td>Separately written services on a different cloud, holding minimal state. Not the system of record</td>
+</tr>
+</tbody></table>
+<p>Sources: <sup class="cite">[<a href="#ref-ant-group-fingrade-arch-2026">7</a>, <a href="#ref-adyen-infrastructure-2026">44</a>, <a href="#ref-block-resilience-2025">9</a>, <a href="#ref-capital-one-dynamodb-resiliency-2021">10</a>, <a href="#ref-nubank-architecture-qcon-2017">6</a>, <a href="#ref-shopify-flash-sale-talk-2022">51</a>, <a href="#ref-monzo-stand-in-2025">11</a>]</sup>.</p>
+<p>The database is usually what makes active-active hard. In 2021 Capital One found application failover across regions &quot;nearly instantaneous&quot; except for PostgreSQL, where promoting a cross-region replica took ten to fifteen minutes. Moving that service to DynamoDB global tables removed database failover entirely <sup class="cite">[<a href="#ref-capital-one-dynamodb-resiliency-2021">10</a>]</sup>. Monzo&#39;s Stand-in solves a different problem. Because its services are written separately and run on another cloud, it can cover failures that a replica of the same code on the same provider would share.</p>
+<h3 id="what-a-real-outage-showed">What a real outage showed</h3>
+<p>During the October 2025 AWS us-east-1 outage, Cash App kept running from us-west-2, a region Block had chosen &quot;for its stability and low failure correlation&quot;. Square&#39;s European sellers, whose transactions were &quot;primarily routed through us-east-1&quot;, saw up to 30% of transactions fail at peak <sup class="cite">[<a href="#ref-block-resilience-2025">9</a>]</sup>. Block&#39;s stated stance: &quot;we design our systems with the assumption that outages like this will happen&quot; <sup class="cite">[<a href="#ref-block-resilience-2025">9</a>]</sup>. The two outcomes, from one company in one incident, show the gap between multi-zone and multi-region designs more clearly than any target could.</p>
+<h3 id="targets-are-rarely-published">Targets are rarely published</h3>
+<p>Ant Group is the only company in the sample that states RPO and RTO <sup class="cite">[<a href="#ref-ant-group-fingrade-arch-2026">7</a>]</sup>. Stripe states a 99.9995% reliability target for its service mesh proxy and API availability above 99.999% <sup class="cite">[<a href="#ref-stripe-mesh-proxy-2026">43</a>, <a href="#ref-stripe-ledger-2024">2</a>]</sup>. Revolut assigns every component one of four availability tiers <sup class="cite">[<a href="#ref-revolut-devops-qcon-2025">53</a>]</sup>. For Uber, Airbnb, Wise, Adyen and Block, the research notes record no published recovery targets.</p>
+
+</section>
+<section class="report-section" data-source="06-languages-and-frameworks.md">
+<h2 id="languages-and-frameworks">Languages and frameworks</h2>
+<div class="finding">
+
+<p><strong>The JVM is the most common runtime, but the language is rarely the decision that shapes the architecture.</strong> More than half of the sample runs its core services on the JVM. Where a company explains its language, the language usually followed something else: the database, latency, or an existing codebase.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Runtime</th>
+<th>Companies (main service language)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>JVM</strong></td>
+<td>Adyen, Revolut, Starling, PayPal, Goldman Sachs, Ant Group, ING, Airbnb payments (Java); Wise, Cash App, N26 (Java and Kotlin); Nubank (Clojure)</td>
+</tr>
+<tr>
+<td><strong>Go</strong></td>
+<td>Monzo; Uber (60% of compute); Robinhood&#39;s newer services</td>
+</tr>
+<tr>
+<td><strong>Ruby</strong></td>
+<td>Stripe, Shopify, Chime; Coinbase&#39;s original application</td>
+</tr>
+<tr>
+<td><strong>Erlang</strong></td>
+<td>Klarna&#39;s core system, with Java for newer services</td>
+</tr>
+</tbody></table>
+<p>Sources: <sup class="cite">[<a href="#ref-adyen-design-duty-architecture-2021">24</a>, <a href="#ref-revolut-qcon-architecture-2025">27</a>, <a href="#ref-starling-rampant-pragmatism-2020">19</a>, <a href="#ref-paypal-hera-talk-2019">63</a>, <a href="#ref-goldman-sachs-reladomo-repo-2016">64</a>, <a href="#ref-ant-group-java-guidelines-en-2022">65</a>, <a href="#ref-airbnb-transactional-integrity-2018">34</a>, <a href="#ref-wise-tech-stack-2025">5</a>, <a href="#ref-block-misk-repo-2026">66</a>, <a href="#ref-n26-tech-stack-2022">67</a>, <a href="#ref-nubank-f1-2021">68</a>, <a href="#ref-monzo-migrations-2800-services-2024">69</a>, <a href="#ref-uber-arm-2025">70</a>, <a href="#ref-robinhood-ceres-derivatives-2026">71</a>, <a href="#ref-stripe-sorbet-2022">72</a>, <a href="#ref-shopify-pods-2018">8</a>, <a href="#ref-chime-rails-foundation-2025">73</a>, <a href="#ref-coinbase-mongobetween-repo-nd">74</a>, <a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>]</sup>.</p>
+<p>Adyen is &quot;almost exclusively&quot; Java, and Monzo states that &quot;All of our services are written in Go&quot; across about 2,800 services <sup class="cite">[<a href="#ref-adyen-design-duty-architecture-2021">24</a>, <a href="#ref-monzo-migrations-2800-services-2024">69</a>]</sup>. Single-language estates like these make shared libraries and platform tooling cheaper, which matters more to the architecture than the language itself.</p>
+<h3 id="when-the-language-followed-something-else">When the language followed something else</h3>
+<ul>
+<li><strong>The database chose the language.</strong> Nubank picked Datomic first: &quot;So because of Datomic, we chose Clojure as the main programming language&quot; <sup class="cite">[<a href="#ref-nubank-cavalcanti-podcast-2021">75</a>]</sup>.</li>
+<li><strong>Latency chose the language.</strong> Robinhood began on Python and Django, then moved latency-sensitive trading and market data services to Go <sup class="cite">[<a href="#ref-robinhood-sed-podcast-2020">76</a>]</sup>. Its newest platform is Go on PostgreSQL <sup class="cite">[<a href="#ref-robinhood-ceres-derivatives-2026">71</a>]</sup>.</li>
+<li><strong>The codebase kept the language.</strong> Stripe kept Ruby and made it safer instead, building Sorbet, a type checker, for a Ruby codebase of more than 15 million lines <sup class="cite">[<a href="#ref-stripe-sorbet-2022">72</a>]</sup>.</li>
+<li><strong>The language stayed and the database moved.</strong> Klarna&#39;s core system, KRED, has run on Erlang since 2004. Klarna migrated its 15 TB database from Mnesia to Aurora PostgreSQL over about three years, with no downtime, without rewriting the Erlang <sup class="cite">[<a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>]</sup>.</li>
+</ul>
+<h3 id="frameworks-are-thin-and-often-in-house">Frameworks are thin, and often in-house</h3>
+<p>Where companies describe their frameworks, they favor small, internal ones that encode platform decisions. Revolut runs &quot;really vanilla Java services with our own internal DDD framework&quot; <sup class="cite">[<a href="#ref-revolut-qcon-architecture-2025">27</a>]</sup>. Cash App builds on Misk, its own open-source Kotlin service framework <sup class="cite">[<a href="#ref-block-misk-repo-2026">66</a>]</sup>. Monzo&#39;s services share in-house Go libraries with Cassandra and etcd built in <sup class="cite">[<a href="#ref-monzo-1500-microservices-2020">77</a>]</sup>. Wise uses Spring Boot across more than 1,000 services, wrapped in an in-house chassis that sets defaults for security, observability, database access and Kafka <sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>]</sup>. The pattern is the same in each case: the framework is where the platform team puts the decisions it does not want every service team to make again.</p>
+
+</section>
+<section class="report-section" data-source="07-design-matrix.md">
+<h2 id="the-design-matrix">The design matrix</h2>
+<p>One row per company, condensed from the research notes. &quot;Not public&quot; means no source was found, not that the design is absent.</p>
+<div class="matrix">
+
+<table>
+<thead>
+<tr>
+<th>Company</th>
+<th>Transactional store</th>
+<th>Data access</th>
+<th>Ledger model</th>
+<th>Atomic unit</th>
+<th>Scaling approach</th>
+<th>Sources</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Stripe</strong></td>
+<td>DocDB, its own service on MongoDB</td>
+<td>Minimal function set behind Go proxies</td>
+<td>Immutable double-entry event log</td>
+<td>Not public</td>
+<td>2,000+ shards; online data movement</td>
+<td><sup class="cite">[<a href="#ref-stripe-docdb-qcon-2025">18</a>, <a href="#ref-stripe-ledger-2024">2</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Adyen</strong></td>
+<td>PostgreSQL, single databases of 100 to 300 TB</td>
+<td>SQL-first: MyBatis, PL/pgSQL</td>
+<td>Double-entry; templates proven to net to zero</td>
+<td>Not public</td>
+<td>Partition large tables; accounting sharded round-robin</td>
+<td><sup class="cite">[<a href="#ref-adyen-sql-comments-2023">78</a>, <a href="#ref-adyen-pgconf-100tb-2025">79</a>, <a href="#ref-adyen-design-duty-accounting-2021">22</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>PayPal</strong></td>
+<td>Oracle (2017); DynamoDB and Spanner in new services</td>
+<td>Hera proxy; repository interfaces</td>
+<td>Not public</td>
+<td>One shard; no cross-shard 2PC; outbox</td>
+<td>Custom sharding since 2009</td>
+<td><sup class="cite">[<a href="#ref-paypal-hera-talk-2019">63</a>, <a href="#ref-paypal-oracle-sharding-2017">80</a>, <a href="#ref-paypal-two-clouds-2026">81</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Block</strong> (Cash App)</td>
+<td>MySQL on Vitess</td>
+<td>ORM: Hibernate</td>
+<td>Immutable double-entry (Square Books, 2019)</td>
+<td>One customer&#39;s shard</td>
+<td>Vitess under the ORM</td>
+<td><sup class="cite">[<a href="#ref-block-sharding-cash-2018">15</a>, <a href="#ref-block-remodeling-payments-2018">46</a>, <a href="#ref-block-books-ledger-2019">30</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Monzo</strong></td>
+<td>Cassandra</td>
+<td>Own Go data library</td>
+<td>Double-entry; balance is the sum of entries</td>
+<td>None; coherence service repairs</td>
+<td>More nodes; time-bucketed balance blocks</td>
+<td><sup class="cite">[<a href="#ref-monzo-thousands-microservices-2023">3</a>, <a href="#ref-monzo-balance-read-time-2023">12</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Revolut</strong></td>
+<td>PostgreSQL, also the event store</td>
+<td>SQL-first: jOOQ</td>
+<td>Not public</td>
+<td>State and event in one database</td>
+<td>Not public</td>
+<td><sup class="cite">[<a href="#ref-revolut-qcon-architecture-2025">27</a>, <a href="#ref-revolut-jooq-plugin-2026">82</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Wise</strong></td>
+<td>MariaDB, PostgreSQL</td>
+<td>Shared in-house chassis</td>
+<td>Several in-house ledgers</td>
+<td>Idempotent tasks</td>
+<td>Not public</td>
+<td><sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>, <a href="#ref-wise-tw-tasks-executor-2025">55</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Starling</strong></td>
+<td>PostgreSQL, one per service</td>
+<td>SQL-first: SQL on Java interfaces</td>
+<td>Immutable double-entry</td>
+<td>One service&#39;s database; no distributed transactions</td>
+<td>About 30 services</td>
+<td><sup class="cite">[<a href="#ref-starling-rampant-pragmatism-2020">19</a>, <a href="#ref-starling-cloud-bank-slides-2018">16</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>N26</strong></td>
+<td>PostgreSQL (from MySQL)</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td><sup class="cite">[<a href="#ref-n26-tech-stack-2022">67</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Nubank</strong></td>
+<td>Datomic, one per service</td>
+<td>Immutable database</td>
+<td>Immutable double-entry</td>
+<td>One customer partition</td>
+<td>Infrastructure cloned per customer partition</td>
+<td><sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>, <a href="#ref-nubank-f1-2021">68</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Robinhood</strong></td>
+<td>PostgreSQL</td>
+<td>Not public</td>
+<td>Ledger eventually consistent with balances by day end</td>
+<td>Relaxed on the ledger path</td>
+<td>Application-level shards</td>
+<td><sup class="cite">[<a href="#ref-robinhood-brokerage-sharding-2021">83</a>, <a href="#ref-robinhood-clearing-accounting-2022">39</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Coinbase</strong></td>
+<td>MongoDB; PostgreSQL</td>
+<td>Connection-pooling proxy</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td><sup class="cite">[<a href="#ref-coinbase-mongobetween-repo-nd">74</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Chime</strong></td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Own ledger (ChimeCore)</td>
+<td>Not public</td>
+<td>Not public</td>
+<td><sup class="cite">[<a href="#ref-chime-10k-2026">84</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Klarna</strong></td>
+<td>Aurora PostgreSQL (from Mnesia)</td>
+<td>Own access layer (kdb)</td>
+<td>Not public</td>
+<td>One module, one database</td>
+<td>Batched reads and writes</td>
+<td><sup class="cite">[<a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>, <a href="#ref-klarna-modular-monolith-2025">21</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Goldman Sachs</strong></td>
+<td>Relational, vendor not stated</td>
+<td>Own ORM: Reladomo</td>
+<td>Bitemporal history</td>
+<td>Not public</td>
+<td>Same schema across 100+ databases (2004)</td>
+<td><sup class="cite">[<a href="#ref-goldman-sachs-reladomo-infoq-2017">85</a>, <a href="#ref-goldman-sachs-reladomo-infoq-part2-2017">86</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>JPMorgan Chase</strong></td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>Capital One</strong></td>
+<td>Mainframe core (2017)</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Reads offloaded to a read-only DynamoDB copy</td>
+<td><sup class="cite">[<a href="#ref-capital-one-serverless-transactions-2017">61</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>ING</strong></td>
+<td>Oracle; Cassandra</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Group-wide Kafka event bus</td>
+<td><sup class="cite">[<a href="#ref-ing-temenos-belgium-nd">87</a>, <a href="#ref-ing-kafka-summit-2018">88</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>BBVA</strong></td>
+<td>DB2 on mainframe</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Not public</td>
+<td>Reads offloaded to Elasticsearch</td>
+<td><sup class="cite">[<a href="#ref-bbva-elastic-nd">89</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Uber</strong></td>
+<td>LedgerStore on Docstore (MySQL-based)</td>
+<td>Custom storage layer</td>
+<td>Immutable double-entry money orders</td>
+<td>One account, optimistic locking</td>
+<td>Hot-account batching; hot and cold tiers</td>
+<td><sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>, <a href="#ref-uber-high-throughput-2026">13</a>, <a href="#ref-uber-ledgerstore-migration-2024">49</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Airbnb</strong></td>
+<td>MySQL</td>
+<td>ActiveRecord (legacy)</td>
+<td>Immutable payment events</td>
+<td>Idempotency keys on the primary</td>
+<td>Idempotency tables sharded by key</td>
+<td><sup class="cite">[<a href="#ref-airbnb-orpheus-2019">23</a>, <a href="#ref-airbnb-payment-orchestration-2022">50</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Shopify</strong></td>
+<td>MySQL, Vitess</td>
+<td>ORM: ActiveRecord</td>
+<td>Not public</td>
+<td>One shop&#39;s pod</td>
+<td>Shard by shop</td>
+<td><sup class="cite">[<a href="#ref-shopify-pods-2018">8</a>, <a href="#ref-shopify-shop-vitess-2024">90</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Ant Group</strong></td>
+<td>OceanBase</td>
+<td>SQL-first: MyBatis rules</td>
+<td>Reserve, then confirm</td>
+<td>TCC across services</td>
+<td>Distributed SQL; separate hot-account store</td>
+<td><sup class="cite">[<a href="#ref-ant-group-oceanbase-history-2025">59</a>, <a href="#ref-ant-group-seata-tcc-2019">58</a>, <a href="#ref-ant-group-maxwell-2021">14</a>]</sup></td>
+</tr>
+<tr>
+<td><strong>Zalando</strong> (reference)</td>
+<td>PostgreSQL</td>
+<td>Stored procedures (2012 to 2015)</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>n/a</td>
+<td><sup class="cite">[<a href="#ref-zalando-sprocwrapper-talk-2012">91</a>]</sup></td>
+</tr>
+</tbody></table>
+</div>
+
+<p>Three patterns are visible before any analysis. Every ledger that is described is built from entries. Where the atomic unit is described, it fits inside one database. And the banks fill most of the &quot;Not public&quot; cells, which is a finding in itself (see Limitations).</p>
+
+</section>
+<section class="report-section" data-source="08-ledger-model.md">
+<h2 id="decision-1-how-to-record-money">Decision 1: How to record money</h2>
+<div class="finding">
+
+<p><strong>Every company that describes its ledger stores money as entries and derives the balance from them. None stores a balance it overwrites.</strong> Once that is settled, the real design work is in three places: where the zero-sum invariant is enforced, how a derived balance stays cheap to read, and what happens to accounts that are too hot to serialize.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Who</th>
+<th>What it buys</th>
+<th>What it costs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Immutable double-entry event log</td>
+<td>Stripe</td>
+<td>Every movement can be explained; Stripe reports over 99.9999% explainability</td>
+<td>Corrections need revert-and-reprocess, not an UPDATE</td>
+</tr>
+<tr>
+<td>Records that must net to zero before commit</td>
+<td>Uber, Starling, Adyen</td>
+<td>An unbalanced state cannot be written</td>
+<td>More rows per payment (about 50 at Adyen)</td>
+</tr>
+<tr>
+<td>Immutable database</td>
+<td>Nubank</td>
+<td>Audit history comes from the store itself</td>
+<td>Poor fit for &quot;fire hose writes&quot;, yet it became the default everywhere</td>
+</tr>
+<tr>
+<td>Bitemporal rows</td>
+<td>Goldman Sachs</td>
+<td>Any past report can be reproduced after a correction</td>
+<td>Two time axes in every query</td>
+</tr>
+<tr>
+<td>Reserve, then confirm</td>
+<td>Ant Group</td>
+<td>Funds are held before a multi-service transaction commits</td>
+<td>Every service implements try, confirm and cancel</td>
+</tr>
+</tbody></table>
+<p>Sources: Stripe <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>]</sup>; Uber <sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>]</sup>; Starling <sup class="cite">[<a href="#ref-starling-rampant-pragmatism-2020">19</a>]</sup>; Adyen <sup class="cite">[<a href="#ref-adyen-design-duty-accounting-2021">22</a>]</sup>; Nubank <sup class="cite">[<a href="#ref-nubank-f1-2021">68</a>, <a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>; Goldman Sachs <sup class="cite">[<a href="#ref-goldman-sachs-reladomo-infoq-part2-2017">86</a>]</sup>; Ant Group <sup class="cite">[<a href="#ref-ant-group-seata-tcc-2019">58</a>]</sup>.</p>
+<h3 id="where-the-invariant-runs">Where the invariant runs</h3>
+<p>The zero-sum check can run at three points, and each moves cost somewhere different. Uber checks at write time: a money order whose debits and credits do not sum to zero is rejected before commit, and a correction is a new money order <sup class="cite">[<a href="#ref-uber-zero-sum-2026">1</a>]</sup>. Adyen checks before deployment: journals can only be produced by templates, and every change to a template is verified automatically by proving that all combinations of inputs net to zero <sup class="cite">[<a href="#ref-adyen-design-duty-accounting-2021">22</a>]</sup>. That costs nothing at runtime, but every new money flow needs a template. Stripe checks after the fact, by measuring how much money movement it can explain <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>]</sup>. Mature systems combine these. Decision 6 covers the after-the-fact layer.</p>
+<h3 id="the-read-path-is-the-cost-nobody-plans-for">The read path is the cost nobody plans for</h3>
+<p>A derived balance gets slower as history grows. Monzo&#39;s ledger had no time component in its Cassandra partitions, so they &quot;kept getting larger&quot;. By early 2023, P99 balance reads took 400 to 500 ms. Monzo reindexed entries into time-bucketed tables and precomputed sums of consecutive entries (&quot;blocks&quot;), which brought reads to about 200 ms <sup class="cite">[<a href="#ref-monzo-balance-read-time-2023">12</a>]</sup>. A year earlier it had fixed a different read problem: each team computed balances with its own time axis, which &quot;brought inconsistency between our data warehouse and our backend&quot;, so it replaced them with named balance definitions <sup class="cite">[<a href="#ref-monzo-balances-2022">92</a>]</sup>.</p>
+<p>Robinhood hit the write side of the same problem. Its clearing ledger was a set of PostgreSQL tables updated by Kafka consumers in &quot;a gigantic transaction with heavy locking&quot;. The redesign relaxed atomicity: ledger entries &quot;only need to be eventually consistent with account balances at the end of the day&quot; <sup class="cite">[<a href="#ref-robinhood-clearing-accounting-2022">39</a>]</sup>.</p>
+<h3 id="hot-accounts-break-per-account-serialization">Hot accounts break per-account serialization</h3>
+<p>Serializing writes per account is the natural way to keep a balance correct, and it fails on hot accounts. At Uber some accounts needed more than 30 operations per second while the system handled 3 to 4. A batching service with 250 ms windows applies each batch as &quot;an atomic update with optimistic locking&quot;, and Uber reports 10x throughput for hot entities <sup class="cite">[<a href="#ref-uber-high-throughput-2026">13</a>, <a href="#ref-uber-zero-sum-2026">1</a>]</sup>. Ant Group went further and built Maxwell, a separate &quot;hot-spot accounting database&quot; for large sellers during shopping festivals. Ant says the usual workarounds (splitting accounts, buffering, non-real-time accounts) all have side effects, and reports &quot;three orders of magnitude performance improvement&quot; <sup class="cite">[<a href="#ref-ant-group-maxwell-2021">14</a>]</sup>.</p>
+<h3 id="corrections-and-deletion">Corrections and deletion</h3>
+<p>Immutability changes how mistakes are fixed. Stripe: &quot;we can&#39;t run simple queries to mutate the state; instead, we have to revert and reprocess prior operations&quot; <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>]</sup>. One cost no company here addresses publicly is erasing personal data from an immutable store under GDPR or Brazil&#39;s LGPD. Datomic supports a deletion feature called excision, but this research found no source on how any company in the sample uses it.</p>
+
+</section>
+<section class="report-section" data-source="09-atomicity-boundaries.md">
+<h2 id="decision-2-where-atomicity-lives">Decision 2: Where atomicity lives</h2>
+<div class="finding">
+
+<p><strong>No company in the sample lets a money transaction span shards under two-phase commit.</strong> They shrink the atomic unit until one database can hold it, or they give up atomicity and repair inconsistency afterwards. Ant Group is the one company that runs a distributed transaction protocol, and it built its own.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Who</th>
+<th>What it buys</th>
+<th>What it costs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Every money transaction on one shard</td>
+<td>Cash App</td>
+<td>Full ACID inside MySQL</td>
+<td>Payments had to be remodeled into per-customer &quot;movements&quot; before sharding</td>
+</tr>
+<tr>
+<td>One database per service, no distributed transactions</td>
+<td>Starling</td>
+<td>Simple local transactions; failures handled by retrying</td>
+<td>Every operation must be idempotent</td>
+</tr>
+<tr>
+<td>Reserve, then confirm (TCC)</td>
+<td>Ant Group</td>
+<td>An atomic outcome across transaction, payment and accounting services</td>
+<td>A protocol that every service must implement</td>
+</tr>
+<tr>
+<td>No transactions; detect and repair</td>
+<td>Monzo</td>
+<td>Horizontal scale on Cassandra</td>
+<td>A coherence service, locks and daily reconciliation</td>
+</tr>
+<tr>
+<td>Relax to end-of-day consistency</td>
+<td>Robinhood</td>
+<td>Heavy locking removed from the ledger write path</td>
+<td>Ledger and balances can disagree during the day</td>
+</tr>
+<tr>
+<td>No cross-shard two-phase commit</td>
+<td>PayPal</td>
+<td>Simple failure modes in the sharding proxy</td>
+<td>Applications must keep each transaction on one shard</td>
+</tr>
+<tr>
+<td>State change and event in one commit (outbox)</td>
+<td>PayPal (2026)</td>
+<td>The event and the state cannot diverge</td>
+<td>An outbox relay to run</td>
+</tr>
+</tbody></table>
+<h3 id="shrink-the-unit-until-it-fits">Shrink the unit until it fits</h3>
+<p>Cash App shows the cost of the first option. Before its first shard split in November 2017, it split every payment into two &quot;movements&quot;, one per customer, so each could live on its own customer&#39;s shard. The customer became the unit that never spans shards <sup class="cite">[<a href="#ref-block-remodeling-payments-2018">46</a>, <a href="#ref-block-sharding-cash-2018">15</a>]</sup>. The reason, in its words: &quot;We will never compromise data consistency in exchange for availability&quot; <sup class="cite">[<a href="#ref-block-sharding-cash-2018">15</a>]</sup>. PayPal&#39;s Hera proxy enforces the same limit from below, by rejecting cross-shard two-phase commit <sup class="cite">[<a href="#ref-paypal-hera-talk-2019">63</a>]</sup>. Nubank&#39;s version is the largest unit of all: each customer partition gets a complete clone of the infrastructure <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>.</p>
+<p>Starling applies the rule at service level. Each service owns its own database, there are no distributed transactions, and the rule is to &quot;do everything at least once and at most once&quot;: retry until success, and make every operation idempotent <sup class="cite">[<a href="#ref-starling-cloud-bank-slides-2018">16</a>]</sup>.</p>
+<h3 id="give-up-atomicity-then-pay-to-repair">Give up atomicity, then pay to repair</h3>
+<p>Monzo chose Cassandra and says it &quot;traded off the ability to have transactional consistency&quot; <sup class="cite">[<a href="#ref-monzo-1500-microservices-2020">77</a>]</sup>. The repair machinery is the price. Reads use quorum, writes go to index tables before the canonical table, and a separate coherence service detects and fixes inconsistencies <sup class="cite">[<a href="#ref-monzo-thousands-microservices-2023">3</a>]</sup>. Robinhood made the narrower trade on one path only. It relaxed consistency between ledger entries and balances to end of day, while noting that &quot;if accounting ledgers are stale, downstream operations like trade reconciliation or settlement will be blocked&quot; <sup class="cite">[<a href="#ref-robinhood-clearing-accounting-2022">39</a>]</sup>.</p>
+<h3 id="when-a-distributed-transaction-is-unavoidable">When a distributed transaction is unavoidable</h3>
+<p>Ant Group&#39;s escrow payments touch transaction, payment and accounting services, and it coordinates them with TCC. In the Try step, the accounting service moves the user&#39;s available funds into &quot;pre-frozen funds&quot;. Confirm consumes the frozen funds and credits the recipient <sup class="cite">[<a href="#ref-ant-group-seata-tcc-2019">58</a>]</sup>. That source is a 2019 engineer&#39;s blog post, machine-translated, and graded Medium. Ant built the coordinator itself and has sold it externally since 2013 <sup class="cite">[<a href="#ref-ant-group-dtx-benefits-2026">93</a>]</sup>.</p>
+<h3 id="make-state-and-events-agree">Make state and events agree</h3>
+<p>When a state change must also publish an event, PayPal&#39;s 2026 onboarding service commits both in one transaction (an outbox), and stores idempotency keys with their responses in the same database <sup class="cite">[<a href="#ref-paypal-two-clouds-2026">81</a>]</sup>. Revolut gets the same guarantee by using PostgreSQL as both database and event store (Decision 5).</p>
+
+</section>
+<section class="report-section" data-source="10-partitioning-and-scale.md">
+<h2 id="decision-3-partitioning-and-scaling-the-store">Decision 3: Partitioning and scaling the store</h2>
+<div class="finding">
+
+<p><strong>Partition by whoever owns the money, and exhaust vertical scale, partitioning and read offloading before you shard.</strong> The companies that sharded early paid with remodeling. The ones that avoided distributed databases did so to protect their data access code.</p>
+</div>
+
+<h3 id="choosing-the-partition-key">Choosing the partition key</h3>
+<table>
+<thead>
+<tr>
+<th>Partition key</th>
+<th>Who</th>
+<th>What it buys</th>
+<th>What it costs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Customer</td>
+<td>Cash App, Nubank</td>
+<td>A customer&#39;s money stays in one shard</td>
+<td>Payments between customers need two records, one per shard</td>
+</tr>
+<tr>
+<td>Shop</td>
+<td>Shopify</td>
+<td>Each shop is isolated in a &quot;pod&quot;</td>
+<td>The sharding key must flow through every query, which needed ORM patches</td>
+</tr>
+<tr>
+<td>Round-robin</td>
+<td>Adyen (accounting)</td>
+<td>Any shard can take any write; easy to add shards</td>
+<td>Queries for one merchant fan out across all shards</td>
+</tr>
+</tbody></table>
+<p>Shopify&#39;s pods and its later move to Vitess both shard by shop. The Vitess move required &quot;patches to ActiveRecord&quot; to pass the sharding key through queries, which the team &quot;wanted to avoid&quot; <sup class="cite">[<a href="#ref-shopify-pods-2018">8</a>, <a href="#ref-shopify-shop-vitess-2024">90</a>]</sup>. Adyen chose the opposite of locality on purpose. When it sharded its accounting database, it routed writes round-robin, not by merchant: &quot;we decided the benefits domain knowledge routing would offer were not worth the loss of flexibility and increased complexity&quot; <sup class="cite">[<a href="#ref-adyen-design-duty-accounting-2021">22</a>]</sup>.</p>
+<h3 id="how-to-shard">How to shard</h3>
+<ul>
+<li><strong>In the application.</strong> Robinhood sharded its brokerage system from 1 to 10 shards at the application level. It had considered Spanner, DynamoDB, CitusDB and CockroachDB, and rejected them because they &quot;would probably require a more invasive rewrite of our core business logic, and data access layers&quot; <sup class="cite">[<a href="#ref-robinhood-brokerage-sharding-2021">83</a>]</sup>.</li>
+<li><strong>In a proxy.</strong> Cash App and Shopify&#39;s Shop app use Vitess under their ORMs <sup class="cite">[<a href="#ref-block-sharding-cash-2018">15</a>, <a href="#ref-shopify-shop-vitess-2024">90</a>]</sup>. PayPal built Hera, its own sharding and connection proxy, and has used custom sharding since 2009 <sup class="cite">[<a href="#ref-paypal-hera-talk-2019">63</a>, <a href="#ref-paypal-oracle-sharding-2017">80</a>]</sup>.</li>
+<li><strong>In a database service.</strong> Stripe built DocDB, a database service on MongoDB, which serves more than 5 million queries a second across more than 2,000 shards <sup class="cite">[<a href="#ref-stripe-docdb-qcon-2025">18</a>]</sup>.</li>
+<li><strong>In a distributed database.</strong> Ant Group built OceanBase, which has carried all of Alipay&#39;s core database traffic since 2016 <sup class="cite">[<a href="#ref-ant-group-oceanbase-history-2025">59</a>]</sup>.</li>
+</ul>
+<h3 id="before-sharding">Before sharding</h3>
+<p>Vertical scale goes further than most teams assume. Stripe scaled single shards vertically to tens of terabytes before building online data movement to scale out <sup class="cite">[<a href="#ref-stripe-docdb-qcon-2025">18</a>]</sup>. Adyen runs single PostgreSQL databases of 100 to 300 TB, and partitions any table that might exceed 100 GB <sup class="cite">[<a href="#ref-adyen-pgconf-100tb-2025">79</a>, <a href="#ref-adyen-partitioning-2023">94</a>]</sup>.</p>
+<p>Moving reads elsewhere buys the most time:</p>
+<ul>
+<li>Adyen split a reporting database off its accounting database before sharding accounting <sup class="cite">[<a href="#ref-adyen-design-duty-accounting-2021">22</a>]</sup>.</li>
+<li>Capital One fed a read-only DynamoDB store from its mainframe core (2017), because &quot;close to 80% of the traffic was related to reading transactions&quot; <sup class="cite">[<a href="#ref-capital-one-serverless-transactions-2017">61</a>]</sup>.</li>
+<li>BBVA put Elasticsearch in front of DB2, so that &quot;as soon as the customer logged in, the system was already querying Elastic, not DB2&quot; <sup class="cite">[<a href="#ref-bbva-elastic-nd">89</a>]</sup>. That source is a vendor case study.</li>
+<li>Uber kept only 12 weeks of hot data in DynamoDB and moved older ledger data to blob storage <sup class="cite">[<a href="#ref-uber-ledgerstore-migration-2024">49</a>]</sup>.</li>
+</ul>
+<p>Sharding is not the end state either. Nubank shards by customer, and says the scheme &quot;worked well for a time but eventually hit physical limits&quot; <sup class="cite">[<a href="#ref-nubank-10-years-2025">95</a>]</sup>.</p>
+
+</section>
+<section class="report-section" data-source="11-data-access.md">
+<h2 id="decision-4-the-data-access-layer">Decision 4: The data access layer</h2>
+<div class="finding">
+
+<p><strong>The ORM versus SQL debate has four answers in this sample, not two. The layer&#39;s most valuable property is narrowness.</strong> The companies that changed databases or shards without rewriting their services all had one thing in common: data access went through a single, deliberately narrow layer.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Who</th>
+<th>What it buys</th>
+<th>What it costs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ORM</td>
+<td>Cash App (Hibernate), Shopify (ActiveRecord)</td>
+<td>Productivity on schemas the service owns</td>
+<td>Sharding keys must be patched through it; generated SQL is harder to bound</td>
+</tr>
+<tr>
+<td>SQL-first</td>
+<td>Adyen (MyBatis, PL/pgSQL), Revolut (jOOQ), Starling (SQL on Java interfaces), Alibaba (MyBatis rules)</td>
+<td>Exact SQL on very large tables; schema-checked queries</td>
+<td>More code per CRUD operation</td>
+</tr>
+<tr>
+<td>Custom data layer or proxy</td>
+<td>Stripe, Monzo, Uber, PayPal, Klarna</td>
+<td>A narrow, controlled set of operations; the store can change underneath</td>
+<td>A platform team to build and run it</td>
+</tr>
+<tr>
+<td>Immutable database</td>
+<td>Nubank (Datomic)</td>
+<td>History and audit are built in</td>
+<td>One store&#39;s limits apply everywhere</td>
+</tr>
+</tbody></table>
+<p>Sources: <sup class="cite">[<a href="#ref-block-remodeling-payments-2018">46</a>, <a href="#ref-shopify-shop-vitess-2024">90</a>, <a href="#ref-adyen-sql-comments-2023">78</a>, <a href="#ref-revolut-jooq-plugin-2026">82</a>, <a href="#ref-starling-rampant-pragmatism-2020">19</a>, <a href="#ref-ant-group-java-guidelines-en-2022">65</a>, <a href="#ref-stripe-docdb-qcon-2025">18</a>, <a href="#ref-monzo-1500-microservices-2020">77</a>, <a href="#ref-paypal-hera-talk-2019">63</a>, <a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>, <a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>.</p>
+<h3 id="narrow-layers-make-the-database-replaceable">Narrow layers make the database replaceable</h3>
+<p>Klarna moved its 15 TB core from Mnesia to PostgreSQL over about three years, with no downtime, because business logic had not called Mnesia directly for years. All access went through kdb, an in-house layer that kept its API and gained a PostgreSQL backend <sup class="cite">[<a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>]</sup>. PayPal&#39;s 2026 onboarding service goes further: business code sees only repository interfaces, and the backing store, DynamoDB or Spanner, is chosen at build time <sup class="cite">[<a href="#ref-paypal-two-clouds-2026">81</a>]</sup>.</p>
+<p>Stripe makes narrowness a reliability feature. DocDB exposes a minimal set of database functions behind Go proxies: &quot;By exposing only a minimal battle-tested set of functions to our engineers, we ensure that these unintended performance and reliability issues don&#39;t materialize&quot; <sup class="cite">[<a href="#ref-stripe-docdb-qcon-2025">18</a>]</sup>. Proxies also absorb load the application cannot control. Coinbase wrote a connection pooler because its &quot;high scale Rails app&quot; caused MongoDB connection storms <sup class="cite">[<a href="#ref-coinbase-mongobetween-repo-nd">74</a>]</sup>, and Shopify routes MySQL traffic through ProxySQL <sup class="cite">[<a href="#ref-shopify-shop-vitess-2024">90</a>]</sup>.</p>
+<h3 id="orms-survive-scale-when-the-scaling-happens-underneath">ORMs survive scale when the scaling happens underneath</h3>
+<p>Cash App kept Hibernate and sharded MySQL with Vitess under it <sup class="cite">[<a href="#ref-block-remodeling-payments-2018">46</a>, <a href="#ref-block-sharding-cash-2018">15</a>]</sup>. Shopify kept ActiveRecord through pods and Vitess, at the cost of patches it hoped Rails composite keys would remove <sup class="cite">[<a href="#ref-shopify-shop-vitess-2024">90</a>, <a href="#ref-shopify-composite-pk-2020">96</a>]</sup>. Mixing styles is normal: 2026 Block job listings name Hibernate for Cash App Banking, jOOQ for the Ledgering team, and iBatis for Cash App Taxes <sup class="cite">[<a href="#ref-block-job-cash-banking-2026">97</a>, <a href="#ref-block-job-ledgering-2026">47</a>, <a href="#ref-block-job-cash-taxes-2026">98</a>]</sup>.</p>
+<h3 id="the-sources-disagree-about-stored-procedures">The sources disagree about stored procedures</h3>
+<p>Zalando routed all Java database access through versioned PostgreSQL stored procedures from 2012, &quot;to achieve both high performance and implement a secure API layer&quot; <sup class="cite">[<a href="#ref-zalando-sprocwrapper-talk-2012">91</a>]</sup>. By 2015 its own slides listed the cost, &quot;CRUD operations need too much code&quot;, and teams later chose their own persistence <sup class="cite">[<a href="#ref-zalando-postgresql-pgconfru-2015">99</a>, <a href="#ref-zalando-data-integration-2015">100</a>]</sup>. Alibaba&#39;s coding manual bans stored procedures as &quot;difficult to debug, extend and not portable&quot; <sup class="cite">[<a href="#ref-ant-group-java-guidelines-en-2022">65</a>]</sup>. The OceanBase team concluded the opposite: &quot;the stored procedure still has great value for OLTP applications&quot; <sup class="cite">[<a href="#ref-ant-group-oceanbase-vldb-2022">101</a>]</sup>. That is a database team writing about its own product. Adyen uses PL/pgSQL in production today <sup class="cite">[<a href="#ref-adyen-sql-comments-2023">78</a>]</sup>.</p>
+
+</section>
+<section class="report-section" data-source="12-service-and-event-boundaries.md">
+<h2 id="decision-5-service-and-event-boundaries">Decision 5: Service and event boundaries</h2>
+<div class="finding">
+
+<p><strong>Service counts differ by more than 100x between companies doing similar work, and two companies moved back toward modular monoliths. The rule that holds everywhere is one database per service or module.</strong></p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Company</th>
+<th>Granularity</th>
+<th>Data ownership</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Nubank</td>
+<td>More than 4,000 microservices</td>
+<td>Each microservice has its own database</td>
+<td><sup class="cite">[<a href="#ref-nubank-cloud-limits-2025">20</a>, <a href="#ref-nubank-data-privacy-2024">102</a>]</sup></td>
+</tr>
+<tr>
+<td>Monzo</td>
+<td>About 2,800 Go services</td>
+<td>One Cassandra keyspace per service</td>
+<td><sup class="cite">[<a href="#ref-monzo-migrations-2800-services-2024">69</a>, <a href="#ref-monzo-thousands-microservices-2023">3</a>]</sup></td>
+</tr>
+<tr>
+<td>Wise</td>
+<td>More than 1,000 services</td>
+<td>In-house chassis sets database access defaults</td>
+<td><sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>]</sup></td>
+</tr>
+<tr>
+<td>Starling</td>
+<td>&quot;About 30-odd services&quot;</td>
+<td>Each service has its own database instance</td>
+<td><sup class="cite">[<a href="#ref-starling-rampant-pragmatism-2020">19</a>, <a href="#ref-starling-cloud-bank-slides-2018">16</a>]</sup></td>
+</tr>
+<tr>
+<td>Klarna (payments)</td>
+<td>Microservices merged into a modular monolith</td>
+<td>&quot;One service, one database&quot;</td>
+<td><sup class="cite">[<a href="#ref-klarna-modular-monolith-2025">21</a>]</sup></td>
+</tr>
+<tr>
+<td>Shopify</td>
+<td>Modular monolith (2019)</td>
+<td>Sharded by shop</td>
+<td><sup class="cite">[<a href="#ref-shopify-modular-monolith-2019">103</a>]</sup></td>
+</tr>
+</tbody></table>
+<h3 id="why-the-counts-diverge">Why the counts diverge</h3>
+<p>The reasons given point in opposite directions. Klarna merged its per-payment-method microservices because shared steps were duplicated across them, creating &quot;a distributed monolith&quot;. The result has &quot;one service, one database, and a structured, clean codebase&quot; and handles over a million orders a day <sup class="cite">[<a href="#ref-klarna-modular-monolith-2025">21</a>]</sup>. Shopify chose a modular monolith in 2019 to avoid the network, deployment and data-access costs of splitting its Rails application <sup class="cite">[<a href="#ref-shopify-modular-monolith-2019">103</a>]</sup>. Starling runs a core bank on about 30 services in a monorepo, released several times a day <sup class="cite">[<a href="#ref-starling-rampant-pragmatism-2020">19</a>]</sup>. At the other end, Monzo and Nubank put the platform work into shared libraries and tooling, so that a new service is cheap. Monzo, for example, builds Cassandra and etcd integration into its shared library <sup class="cite">[<a href="#ref-monzo-1500-microservices-2020">77</a>]</sup>.</p>
+<p>The count is a consequence of how cheap a new service is to create and operate, not a target. The invariant across every model is that a service or module owns its data and nothing else writes to it.</p>
+<h3 id="kafka-or-the-database-you-already-run">Kafka, or the database you already run</h3>
+<p>Most of the sample moves events through Kafka. Nubank reports 72 billion events a day <sup class="cite">[<a href="#ref-nubank-cloud-limits-2025">20</a>]</sup>. PayPal runs more than 1,500 brokers and has peaked at 1.32 trillion messages a day <sup class="cite">[<a href="#ref-paypal-kafka-2023">31</a>]</sup>. Wise uses Kafka for &quot;most of our real-time data movement&quot; <sup class="cite">[<a href="#ref-wise-tech-stack-2025">5</a>]</sup>.</p>
+<p>Two neobanks chose PostgreSQL instead. Revolut uses it &quot;as the database, as the event store and event stream&quot;. It explains why it skipped Kafka: &quot;Because we know exactly how to deal with databases ... We know exactly how to monitor them, how to scale them&quot; <sup class="cite">[<a href="#ref-revolut-qcon-architecture-2025">27</a>]</sup>. Starling chose PostgreSQL notifications over Kafka <sup class="cite">[<a href="#ref-starling-rampant-pragmatism-2020">19</a>]</sup>. The trade: one fewer system to operate, and state and events that commit together, in exchange for the fan-out and throughput a dedicated log provides.</p>
+<p>Whichever transport is used, consumers must assume duplicates. Nubank requires every Kafka message to be idempotent <sup class="cite">[<a href="#ref-nubank-architecture-qcon-2017">6</a>]</sup>. Wise&#39;s task engine detects the same task being created twice, typically from a redelivered Kafka message <sup class="cite">[<a href="#ref-wise-tw-tasks-executor-2025">55</a>]</sup>.</p>
+
+</section>
+<section class="report-section" data-source="13-correctness.md">
+<h2 id="decision-6-how-to-know-the-money-is-right">Decision 6: How to know the money is right</h2>
+<div class="finding">
+
+<p><strong>No company trusts a single mechanism.</strong> Every company that describes its approach combines three layers: invariants that stop bad writes, idempotency that makes retries safe, and reconciliation that measures the result.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Who</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Stop bad writes</td>
+<td>Zero-sum check at commit; templates proven to net to zero; single-shard transactions</td>
+<td>Uber, Adyen, Cash App</td>
+</tr>
+<tr>
+<td>Make retries safe</td>
+<td>Idempotency keys on the primary; deduplication tables; idempotent consumers</td>
+<td>Airbnb, Wise, Starling, Shopify, Robinhood, Nubank, PayPal</td>
+</tr>
+<tr>
+<td>Measure the result</td>
+<td>Explainability rate; daily audits; continuous reconciliation from database logs</td>
+<td>Stripe, Uber, Airbnb, Monzo, Coinbase</td>
+</tr>
+</tbody></table>
+<h3 id="idempotency-details-that-matter">Idempotency details that matter</h3>
+<ul>
+<li><strong>Keep keys on the primary database.</strong> Airbnb&#39;s Orpheus library keeps idempotency tables &quot;always read and written from a sharded master database (for consistency)&quot;, sharded by idempotency key <sup class="cite">[<a href="#ref-airbnb-orpheus-2019">23</a>]</sup>. For payments, Airbnb also disables replica reads, &quot;trading off load on the main database for data integrity&quot; (2015) <sup class="cite">[<a href="#ref-airbnb-rails-payments-2015">104</a>]</sup>. Replica lag is how a retry turns into a double charge.</li>
+<li><strong>Store the response with the key.</strong> PayPal stores idempotency keys with their responses in the same database, and expires them with a TTL or a deletion policy <sup class="cite">[<a href="#ref-paypal-two-clouds-2026">81</a>]</sup>.</li>
+<li><strong>Record progress, not just completion.</strong> Shopify saves each payment request as a database row recording which step has completed, so a retry resumes instead of starting over <sup class="cite">[<a href="#ref-shopify-graphql-idempotency-2019">105</a>]</sup>.</li>
+<li><strong>Make it a library.</strong> Wise&#39;s open-source task engine guarantees that no task &quot;is processed twice. We don&#39;t want to have missing payouts or double payouts&quot;, and its idempotence4j library records every action in the database <sup class="cite">[<a href="#ref-wise-tw-tasks-executor-2025">55</a>, <a href="#ref-wise-idempotence4j-2026">106</a>]</sup>.</li>
+</ul>
+<h3 id="reconciliation-as-a-metric">Reconciliation as a metric</h3>
+<ul>
+<li>Stripe measures the share of money movement it can explain, and reports over 99.9999% <sup class="cite">[<a href="#ref-stripe-ledger-2024">2</a>]</sup>.</li>
+<li>Uber&#39;s audit framework checks more than 1 billion accounting transactions a day <sup class="cite">[<a href="#ref-uber-audit-framework-2023">33</a>]</sup>.</li>
+<li>Airbnb compares every transaction &quot;from day zero&quot; across its own systems and its processors&#39; settlement files <sup class="cite">[<a href="#ref-airbnb-transactional-integrity-2018">34</a>]</sup>.</li>
+<li>Monzo reconciles its ledger daily against bank statements <sup class="cite">[<a href="#ref-monzo-payments-safely-2022">38</a>]</sup>.</li>
+<li>Coinbase&#39;s Overseer reconciles by reading database write-ahead logs, which cut detection time from up to 24 hours to under a minute <sup class="cite">[<a href="#ref-coinbase-overseer-reconciliation-2022">35</a>]</sup>.</li>
+</ul>
+<p>The working definition this suggests: a money system is correct when its errors are detected quickly and explained, not when its code is assumed to be bug-free.</p>
+
+</section>
+<section class="report-section" data-source="14-migrations.md">
+<h2 id="migrating-a-live-money-system">Migrating a live money system</h2>
+<div class="finding">
+
+<p><strong>The migrations in this sample were slow, layered and verified.</strong> None was a cutover. Each one changed one thing at a time behind an abstraction, and compared the old and new paths until the numbers matched.</p>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Technique</th>
+<th>Who</th>
+<th>What it looked like</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Put an abstraction in first</td>
+<td>Klarna</td>
+<td>Mnesia swapped for PostgreSQL behind its kdb layer, over about three years, with no downtime</td>
+</tr>
+<tr>
+<td>Remodel the data before splitting it</td>
+<td>Cash App</td>
+<td>Payments split into per-customer movements before the first shard split</td>
+</tr>
+<tr>
+<td>Dual-write, compare, then cut over</td>
+<td>Stripe (2017)</td>
+<td>Four steps: dual-write, move reads, move writes, remove the old path; reads compared with Scientist</td>
+</tr>
+<tr>
+<td>Shadow, backfill, validate</td>
+<td>Uber</td>
+<td>Shadow validation at 99.99% or better; idempotent backfills; checksums matched across regions</td>
+</tr>
+<tr>
+<td>Move data online in small units</td>
+<td>Stripe</td>
+<td>Online data movement across DocDB shards with versioned gating</td>
+</tr>
+</tbody></table>
+<p>Sources: Klarna <sup class="cite">[<a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>]</sup>; Cash App <sup class="cite">[<a href="#ref-block-remodeling-payments-2018">46</a>, <a href="#ref-block-sharding-cash-2018">15</a>]</sup>; Stripe <sup class="cite">[<a href="#ref-stripe-online-migrations-2017">107</a>, <a href="#ref-stripe-docdb-qcon-2025">18</a>]</sup>; Uber <sup class="cite">[<a href="#ref-uber-ledgerstore-migration-2024">49</a>, <a href="#ref-uber-docstore-ledger-migration-2021">108</a>]</sup>.</p>
+<h3 id="prove-equivalence-do-not-assume-it">Prove equivalence, do not assume it</h3>
+<p>Klarna used property-based tests to check that the Mnesia and PostgreSQL backends of kdb behaved identically. It also added multi-read and multi-write operations, because one batched PostgreSQL select was much faster than many separate calls <sup class="cite">[<a href="#ref-klarna-kred-mnesia-postgres-2025">17</a>]</sup>. The abstraction had to grow a little to fit the new store.</p>
+<p>Uber&#39;s ledger migrations show the scale such verification reaches. The 2021 phase backfilled more than 250 billion records (about 300 TB) at up to 1 million messages a second. It closed each sealing window only when checksums from two regions matched, and used Kafka offsets and sequence numbers for exactly-once processing <sup class="cite">[<a href="#ref-uber-docstore-ledger-migration-2021">108</a>]</sup>. The later move off DynamoDB targeted at least 99.99% completeness and correctness in shadow validation, checked offline against a DynamoDB dump, and required every backfill job to be idempotent <sup class="cite">[<a href="#ref-uber-ledgerstore-migration-2024">49</a>]</sup>.</p>
+<h3 id="remodel-first">Remodel first</h3>
+<p>Cash App could not shard payments as they were, because a payment touched two customers. Splitting each payment into two movements, one for the sender and one for the recipient, came first. Sharding came after <sup class="cite">[<a href="#ref-block-remodeling-payments-2018">46</a>]</sup>. The order matters: the data model decides what can be partitioned, so it has to change before the storage does.</p>
+
+</section>
+<section class="report-section" data-source="15-design-heuristics.md">
+<h2 id="heuristics-for-architects">Heuristics for architects</h2>
+<p>Each rule below is practiced by several companies in the sample. The parenthesis names where the evidence is.</p>
+<h3 id="architecture">Architecture</h3>
+<ol>
+<li><p><strong>Make the ledger the only component that owns money.</strong> Treat balances, events and warehouse tables as derived and rebuildable, and put the strongest guarantees in one place (Uber, Stripe).</p>
+</li>
+<li><p><strong>Keep the synchronous path short.</strong> Edge, orchestration, ledger and gateway are on the request path. Everything else consumes events (Uber&#39;s split between Cadence and Kafka; Adyen&#39;s asynchronous processing behind a stateless edge).</p>
+</li>
+<li><p><strong>Keep the edge stateless and unable to write to core data.</strong> An internet-facing component that cannot write to central databases limits what an attacker or a bug can reach (Adyen).</p>
+</li>
+<li><p><strong>Put network connectivity on a thin physical tier, and keep decisions in the core.</strong> Scheme connections need owned hardware. Business logic does not (Monzo, Nubank, Starling, Wise).</p>
+</li>
+<li><p><strong>Use one partition key for data, traffic and deployment.</strong> Route requests to cells by the same key that shards the database, and design an explicit global path for the few operations that cross cells (Ant Group, Nubank, Shopify).</p>
+</li>
+<li><p><strong>Pick regions for low failure correlation, and drill the failover.</strong> Multi-zone is not multi-region, as one 2025 outage showed (Block).</p>
+</li>
+<li><p><strong>Take database failover off the critical path where you can.</strong> Writes that stay in their own region and replicate continuously removed a 10 to 15 minute promotion step (Capital One).</p>
+</li>
+<li><p><strong>For the most critical customer functions, consider a standby built from different code on a different provider.</strong> A replica shares the primary&#39;s bugs. An independent minimal platform does not (Monzo).</p>
+</li>
+</ol>
+<h3 id="design">Design</h3>
+<ol>
+<li><p><strong>Store entries, derive balances, and design the balance read path on day one.</strong> Summing history gets slow, and fixing it later means reindexing a live ledger (Monzo, Decision 1).</p>
+</li>
+<li><p><strong>Put the zero-sum invariant where it is cheapest to enforce, and enforce it more than once.</strong> At build time for known flows (Adyen), at commit for everything (Uber), and in reconciliation afterwards (Stripe).</p>
+</li>
+<li><p><strong>Size the atomic unit to fit one database.</strong> Choose the partition key so that a money transaction never needs a second shard. If a business operation spans two owners, split it into two records (Cash App).</p>
+</li>
+<li><p><strong>Treat hot accounts as a separate design problem.</strong> Per-account serialization caps throughput. Batching (Uber, 10x) or a dedicated store (Ant, three orders of magnitude) are the documented answers.</p>
+</li>
+<li><p><strong>Exhaust vertical scale, partitioning and read offloading before sharding.</strong> Single PostgreSQL databases of 100 to 300 TB run in production (Adyen). Most read traffic can move to a copy (Capital One, BBVA).</p>
+</li>
+<li><p><strong>Keep data access behind one narrow layer.</strong> It is what made database swaps (Klarna), store portability (PayPal) and safe scaling (Stripe) possible without rewriting services. An ORM is acceptable inside that layer, as long as sharding happens underneath it (Cash App, Shopify).</p>
+</li>
+<li><p><strong>Give every service or module exclusive ownership of its data, and choose the service count by operating cost.</strong> Thirty services (Starling) and four thousand (Nubank) both work. A distributed monolith does not (Klarna).</p>
+</li>
+<li><p><strong>Prefer the system your team already operates for events, until throughput forces a log.</strong> PostgreSQL as an event store (Revolut) and Kafka peaking above a trillion messages a day (PayPal) are both valid at their scale. Either way, make every consumer idempotent.</p>
+</li>
+<li><p><strong>Keep idempotency keys and money reads on the primary.</strong> Store the response with the key, and record the steps completed so a retry can resume (Airbnb, PayPal, Shopify).</p>
+</li>
+<li><p><strong>Measure correctness as a number.</strong> An explainability rate or a daily audit count turns &quot;we think it is right&quot; into something a team can track (Stripe, Uber).</p>
+</li>
+<li><p><strong>Migrate behind an abstraction, remodel before you split, and verify by comparison.</strong> Klarna&#39;s kdb, Cash App&#39;s movements, and Stripe&#39;s and Uber&#39;s dual paths all followed this order.</p>
+</li>
+</ol>
+
+</section>
+<section class="report-section" data-source="16-limitations.md">
+<h2 id="limitations">Limitations</h2>
+<p><strong>Disclosure is uneven.</strong> Fintechs that recruit engineers through their blogs publish a great deal. Banks publish very little about their transactional systems. For JPMorgan Chase, Capital One, ING and BBVA, this research found no public source on how applications reach the database or on the ledger model. Several bank and Medium-hosted pages also refused automated reading, so a few relevant sources remain unread. &quot;No public source found&quot; in this report means exactly that. It is not evidence that a company does not use a technology.</p>
+<p><strong>What gets published is biased.</strong> Companies write about systems that worked and migrations that finished. Abandoned designs and quiet reversals rarely get a blog post, so the record over-represents success.</p>
+<p><strong>Some of the strongest sources are old.</strong> Several key sources date from 2012 to 2021. Their years are given in the text, and the per-company research notes record later evidence where it exists. A design described in 2017 may have changed since.</p>
+<p><strong>Job listings describe intent.</strong> A listing shows what a team works with or wants to hire for. It is a weaker signal than an engineering post about a running system, so listings are graded Medium and labeled where they carry a claim.</p>
+<p><strong>Some authors have a stake.</strong> A database team writing about its own database, or a vendor writing about a customer, has reasons to present it well. Those sources are flagged where they matter. Where two first-party sources disagree on a date or figure, the research notes record both.</p>
+
+</section>
+<section class="references"><h2 id="references">References</h2>
+<ol>
+<li id="ref-uber-zero-sum-2026"><a href="https://www.uber.com/blog/ubers-payments-platform/">Zero Sum by Design: 10 Years of Uber's Payments Platform</a>. Uber Engineering Blog, 2026-08. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/ubers-payments-platform/</span></li>
+<li id="ref-stripe-ledger-2024"><a href="https://stripe.dev/blog/ledger-stripe-system-for-tracking-and-validating-money-movement">Ledger: Stripe's system for tracking and validating money movement</a>. Stripe (stripe.dev, Ilya Ganelin), 2024-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.dev/blog/ledger-stripe-system-for-tracking-and-validating-money-movement</span></li>
+<li id="ref-monzo-thousands-microservices-2023"><a href="https://www.infoq.com/presentations/banking-thousands-microservices-2023">Banking on Thousands of Microservices, QCon London 2023 (Suhail Patel; InfoQ published 2024-01)</a>. InfoQ, 2023. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/banking-thousands-microservices-2023</span></li>
+<li id="ref-starling-card-processor-2022"><a href="https://www.infoq.com/presentations/card-processor-microservices/">How Starling Built Their Own Card Processor, QCon Plus transcript (Rob Donovan, Ioana Creanga)</a>. InfoQ, 2022-12. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/card-processor-microservices/</span></li>
+<li id="ref-wise-tech-stack-2025"><a href="https://medium.com/wise-engineering/wise-tech-stack-2025-update-d0e63fe718c7">Wise Tech Stack (2025 update) (Milon James); read via the publication's RSS feed because the article page returned 403</a>. Wise Engineering (Medium), 2025-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/wise-engineering/wise-tech-stack-2025-update-d0e63fe718c7</span></li>
+<li id="ref-nubank-architecture-qcon-2017"><a href="https://www.infoq.com/presentations/nubank-architecture">Architecting a Modern Financial Institution (Edward Wible, Rafael Ferreira, QCon SF 2017)</a>. InfoQ, 2017-12 (older than 5 years). <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/nubank-architecture</span></li>
+<li id="ref-ant-group-fingrade-arch-2026"><a href="https://help.aliyun.com/en/document_detail/2806105.html">Building a financial-grade transaction system from distributed to cloud-native (SOFAStack docs)</a>. Alibaba Cloud / Ant Group, 2026-03 (last updated; original date not shown). <span class="ev ev-strong">Strong</span> <span class="print-url">https://help.aliyun.com/en/document_detail/2806105.html</span></li>
+<li id="ref-shopify-pods-2018"><a href="https://shopify.engineering/a-pods-architecture-to-allow-shopify-to-scale">A Pods Architecture To Allow Shopify To Scale (2018)</a>. Shopify Engineering (Xavier Denis), 2018-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://shopify.engineering/a-pods-architecture-to-allow-shopify-to-scale</span></li>
+<li id="ref-block-resilience-2025"><a href="https://engineering.block.xyz/blog/building-for-resilience">Building for Resilience: How Block's Engineering Teams Kept Systems Running During the AWS Outage (Randy Wigginton)</a>. Block Engineering Blog, 2025-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://engineering.block.xyz/blog/building-for-resilience</span></li>
+<li id="ref-capital-one-dynamodb-resiliency-2021"><a href="https://www.capitalone.com/tech/software-engineering/comparing-dynamodb-and-aurora-global-database-and-aurora-multi-master/">Moving to DynamoDB to increase application resiliency (Kelly Jo Brown)</a>. Capital One Tech, 2021-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.capitalone.com/tech/software-engineering/comparing-dynamodb-and-aurora-global-database-and-aurora-multi-master/</span></li>
+<li id="ref-monzo-stand-in-2025"><a href="https://monzo.com/blog/tolerating-full-cloud-outages-with-monzo-stand-in">Tolerating full cloud outages with Monzo Stand-in (Daniel Chatfield, Andrew Lawson)</a>. Monzo, 2025-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://monzo.com/blog/tolerating-full-cloud-outages-with-monzo-stand-in</span></li>
+<li id="ref-monzo-balance-read-time-2023"><a href="https://monzo.com/blog/2023/04/28/speeding-up-our-balance-read-time-the-planning-phase">Speeding up our balance read time: the planning phase (Basma Taha, Nick Ng)</a>. Monzo, 2023-04. <span class="ev ev-strong">Strong</span> <span class="print-url">https://monzo.com/blog/2023/04/28/speeding-up-our-balance-read-time-the-planning-phase</span></li>
+<li id="ref-uber-high-throughput-2026"><a href="https://www.uber.com/blog/high-throughput-processing/">Building High Throughput Payment Account Processing</a>. Uber Engineering Blog, 2026-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/high-throughput-processing/</span></li>
+<li id="ref-ant-group-maxwell-2021"><a href="https://arxiv.org/abs/2112.11030">Maxwell: a hardware and software highly integrated compute-storage system (arXiv 2112.11030)</a>. Ant Group, 2021-12. <span class="ev ev-strong">Strong</span> <span class="print-url">https://arxiv.org/abs/2112.11030</span></li>
+<li id="ref-block-sharding-cash-2018"><a href="https://code.cash.app/sharding-cash">Sharding Cash</a>. Cash App Code Blog (Jon Tirsén), 2018-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://code.cash.app/sharding-cash</span></li>
+<li id="ref-starling-cloud-bank-slides-2018"><a href="https://archive.qconlondon.com/system/files/presentation-slides/qcon_2018.pptx.pdf">Building a Reliable Cloud Bank in Java, slides (Jason Maude, March 2018)</a>. QCon London archive, 2018-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://archive.qconlondon.com/system/files/presentation-slides/qcon_2018.pptx.pdf</span></li>
+<li id="ref-klarna-kred-mnesia-postgres-2025"><a href="https://engineering.klarna.com/the-fellowship-of-the-forgotten-d341045a6123">The fellowship of the forgotten (KRED migration from Mnesia to Postgres; Onno Vos; read via the blog's RSS feed)</a>. Klarna Engineering, 2025-02-26. <span class="ev ev-strong">Strong</span> <span class="print-url">https://engineering.klarna.com/the-fellowship-of-the-forgotten-d341045a6123</span></li>
+<li id="ref-stripe-docdb-qcon-2025"><a href="https://www.infoq.com/presentations/docdb-online-database/">Stripe's DocDB: How Zero-Downtime Data Movement Powers Trillion-Dollar Payment Processing (QCon San Francisco 2025 talk, transcript published 2026-04)</a>. InfoQ (speaker Jimmy Morzaria, Stripe), 2025-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/docdb-online-database/</span></li>
+<li id="ref-starling-rampant-pragmatism-2020"><a href="https://www.infoq.com/presentations/starling-bank-pragmatism">Rampant Pragmatism: Growth and Change at Starling Bank, QCon London 2020 transcript (Dan Osborne, Martin Dow)</a>. InfoQ, 2020. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/starling-bank-pragmatism</span></li>
+<li id="ref-nubank-cloud-limits-2025"><a href="https://building.nu.com/managing-cloud-limits">Managing cloud limits (Engineering Meetup #10)</a>. Building Nubank, 2025-04-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://building.nu.com/managing-cloud-limits</span></li>
+<li id="ref-klarna-modular-monolith-2025"><a href="https://engineering.klarna.com/how-micro-should-your-microservices-be-9ae7507a625c">How micro should your microservices be? (Raya Rizk; read via RSS feed)</a>. Klarna Engineering, 2025-03-24. <span class="ev ev-strong">Strong</span> <span class="print-url">https://engineering.klarna.com/how-micro-should-your-microservices-be-9ae7507a625c</span></li>
+<li id="ref-adyen-design-duty-accounting-2021"><a href="https://www.adyen.com/knowledge-hub/design-to-duty-adyen-architecture-part2">Design to Duty: The Accounting and Reporting Systems at Adyen</a>. Adyen (Willem Pino), 2021-08. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.adyen.com/knowledge-hub/design-to-duty-adyen-architecture-part2</span></li>
+<li id="ref-airbnb-orpheus-2019"><a href="https://medium.com/airbnb-engineering/avoiding-double-payments-in-a-distributed-payments-system-2981f6b070bb">Avoiding double payments in a distributed payments system</a>. Airbnb Tech Blog (Jon Chew, Ninad Khisti), 2019-04. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/airbnb-engineering/avoiding-double-payments-in-a-distributed-payments-system-2981f6b070bb</span></li>
+<li id="ref-adyen-design-duty-architecture-2021"><a href="https://www.adyen.com/knowledge-hub/design-to-duty-adyen-architecture">Design to Duty: How we make architecture decisions at Adyen</a>. Adyen, 2021-07. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.adyen.com/knowledge-hub/design-to-duty-adyen-architecture</span></li>
+<li id="ref-airbnb-payments-platform-2016"><a href="https://medium.com/airbnb-engineering/scaling-airbnbs-payment-platform-43ebfc99b324">Scaling Airbnb's Payment Platform</a>. Airbnb Tech Blog (Angela Zhu, Karen Kim), 2016-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/airbnb-engineering/scaling-airbnbs-payment-platform-43ebfc99b324</span></li>
+<li id="ref-starling-cloud-bank-java-2018"><a href="https://www.infoq.com/presentations/starling-bank">Building a Reliable Cloud-Based Bank in Java, QCon San Francisco 2018 transcript (Jason Maude)</a>. InfoQ, 2018. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/starling-bank</span></li>
+<li id="ref-revolut-qcon-architecture-2025"><a href="https://www.infoq.com/presentations/advice-architecture">Unveiling the Tech Underpinning FinTech's Revolution, QCon London 2024 (Wojtek Ptak, Andrzej Grzesik)</a>. InfoQ, 2025-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/advice-architecture</span></li>
+<li id="ref-monzo-faster-payments-gateway-2020"><a href="https://monzo.com/blog/how-we-moved-our-faster-payments-connection-in-house">How we moved our Faster Payments connection in-house (Wayne Tsai)</a>. Monzo, 2020-05. <span class="ev ev-strong">Strong</span> <span class="print-url">https://monzo.com/blog/how-we-moved-our-faster-payments-connection-in-house</span></li>
+<li id="ref-uber-ledgerstore-indexes-2024"><a href="https://www.uber.com/blog/how-ledgerstore-supports-trillions-of-indexes/">How LedgerStore Supports Trillions of Indexes at Uber</a>. Uber Engineering Blog, 2024-04. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/how-ledgerstore-supports-trillions-of-indexes/</span></li>
+<li id="ref-block-books-ledger-2019"><a href="https://developer.squareup.com/blog/books-an-immutable-double-entry-accounting-database-service/">Books, an immutable double-entry accounting database service</a>. Square Developer Blog (The Corner), 2019-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://developer.squareup.com/blog/books-an-immutable-double-entry-accounting-database-service/</span></li>
+<li id="ref-paypal-kafka-2023"><a href="https://developer.paypal.com/community/blog/scaling-kafka-to-support-paypals-data-growth/">Scaling Kafka to Support PayPal's Data Growth</a>. PayPal Developer Blog (Monish Koppa), 2023-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://developer.paypal.com/community/blog/scaling-kafka-to-support-paypals-data-growth/</span></li>
+<li id="ref-chime-event-bus-2022"><a href="https://medium.com/life-at-chime/bridging-the-data-gap-4c3ee2568a76">Bridging the Data Gap (Part I of Building a Streaming Platform at Chime; read via the publication's RSS feed)</a>. Life at Chime (Medium), 2022-11-15. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/life-at-chime/bridging-the-data-gap-4c3ee2568a76</span></li>
+<li id="ref-uber-audit-framework-2023"><a href="https://www.uber.com/blog/automated-audit-framework-for-internet-scale-financial-transactions/">Automated Audit Framework For Internet Scale Financial Transactions</a>. Uber Engineering Blog, 2023-06. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/automated-audit-framework-for-internet-scale-financial-transactions/</span></li>
+<li id="ref-airbnb-transactional-integrity-2018"><a href="https://medium.com/airbnb-engineering/measuring-transactional-integrity-in-airbnbs-distributed-payment-ecosystem-a670d6926d22">Measuring transactional integrity in Airbnb's distributed payment ecosystem</a>. Airbnb Tech Blog (Ninad Khisti, William Betz), 2018-01. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/airbnb-engineering/measuring-transactional-integrity-in-airbnbs-distributed-payment-ecosystem-a670d6926d22</span></li>
+<li id="ref-coinbase-overseer-reconciliation-2022"><a href="https://medium.com/the-coinbase-blog/real-time-reconciliation-with-overseer-4d1b75a77f0c">Real-time reconciliation with Overseer (Cedric Cordenier; read in full via the publication's RSS feed)</a>. The Coinbase Blog (Medium), 2022-09-06. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/the-coinbase-blog/real-time-reconciliation-with-overseer-4d1b75a77f0c</span></li>
+<li id="ref-shopify-cdc-2021"><a href="https://shopify.engineering/capturing-every-change-shopify-sharded-monolith">Capturing Every Change From Shopify's Sharded Monolith (2021)</a>. Shopify Engineering (John Martin, Adam Bellemare), 2021-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://shopify.engineering/capturing-every-change-shopify-sharded-monolith</span></li>
+<li id="ref-stripe-docdb-2024"><a href="https://stripe.dev/blog/how-stripes-document-databases-supported-99.999-uptime-with-zero-downtime-data-migrations">How Stripe's document databases supported 99.999% uptime with zero-downtime data migrations</a>. Stripe (stripe.dev, Jimmy Morzaria and Suraj Narkhede), 2024-06. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.dev/blog/how-stripes-document-databases-supported-99.999-uptime-with-zero-downtime-data-migrations</span></li>
+<li id="ref-monzo-payments-safely-2022"><a href="https://monzo.com/blog/2022/02/08/processing-payments-safely-at-scale">Processing payments safely at scale (Joost van Oorschot)</a>. Monzo, 2022-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://monzo.com/blog/2022/02/08/processing-payments-safely-at-scale</span></li>
+<li id="ref-robinhood-clearing-accounting-2022"><a href="https://robinhood.com/us/en/newsroom/part-i-scaling-robinhood-clearing-accounting">Part I: Scaling Robinhood Clearing Accounting</a>. Robinhood Newsroom, 2022-04-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://robinhood.com/us/en/newsroom/part-i-scaling-robinhood-clearing-accounting</span></li>
+<li id="ref-stripe-payments-api-2020"><a href="https://stripe.dev/blog/payment-api-design">Stripe's payments APIs: The first 10 years (2020, older than 5 years)</a>. Stripe (stripe.dev, Michelle Bu), 2020-12. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.dev/blog/payment-api-design</span></li>
+<li id="ref-stripe-rate-limiters-2017"><a href="https://stripe.com/blog/rate-limiters">Scaling your API with rate limiters (2017, older than 5 years)</a>. Stripe (Paul Tarjan), 2017-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.com/blog/rate-limiters</span></li>
+<li id="ref-stripe-idempotency-2017"><a href="https://stripe.com/blog/idempotency">Designing robust and predictable APIs with idempotency</a>. Stripe (Brandur Leach), 2017-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.com/blog/idempotency</span></li>
+<li id="ref-stripe-mesh-proxy-2026"><a href="https://stripe.dev/blog/building-a-data-plane-from-scratch-stripes-own-high-performance-distributed-proxy">Building a data plane from scratch: Stripe's own high-performance distributed proxy</a>. Stripe (stripe.dev, Jack Loughran and Cara Mecozzi), 2026-08. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.dev/blog/building-a-data-plane-from-scratch-stripes-own-high-performance-distributed-proxy</span></li>
+<li id="ref-adyen-infrastructure-2026"><a href="https://www.adyen.com/infrastructure">Payments platform infrastructure</a>. Adyen, 2026-11 (accessed; undated page). <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.adyen.com/infrastructure</span></li>
+<li id="ref-block-temporal-cashapp-2024"><a href="https://temporal.io/resources/on-demand/great-tech-is-not-enough">Great tech is not enough: building trust to get the most out of Temporal at Cash App (Replay 2024 session page, abstract and bios only; Nick Esposito, Riley Pruitt)</a>. Temporal, 2024-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://temporal.io/resources/on-demand/great-tech-is-not-enough</span></li>
+<li id="ref-block-remodeling-payments-2018"><a href="https://code.cash.app/remodeling-cash-app-payments">Remodeling Cash App Payments</a>. Cash App Code Blog (Jesse Wilson), 2018-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://code.cash.app/remodeling-cash-app-payments</span></li>
+<li id="ref-block-job-ledgering-2026"><a href="https://www.builtinnyc.com/job/senior-software-engineer-ledgering/10299757">Senior Software Engineer, Ledgering, job listing via Built In NYC (removed 2026-09-01)</a>. Block, 2026. <span class="ev ev-medium">Medium</span> <span class="print-url">https://www.builtinnyc.com/job/senior-software-engineer-ledgering/10299757</span></li>
+<li id="ref-uber-gulfstream-2020"><a href="https://www.uber.com/blog/money-scale-strong-data/">Revolutionizing Money Movements at Scale with Strong Data Consistency (2020, older than 5 years)</a>. Uber Engineering Blog, 2020-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/money-scale-strong-data/</span></li>
+<li id="ref-uber-ledgerstore-migration-2024"><a href="https://www.uber.com/blog/migrating-from-dynamodb-to-ledgerstore/">Migrating a Trillion Entries of Uber's Ledger Data from DynamoDB to LedgerStore</a>. Uber Engineering Blog, 2024-04. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/migrating-from-dynamodb-to-ledgerstore/</span></li>
+<li id="ref-airbnb-payment-orchestration-2022"><a href="https://medium.com/airbnb-engineering/rebuilding-payment-orchestration-at-airbnb-341d194a781b">Rebuilding Payment Orchestration at Airbnb</a>. Airbnb Tech Blog (Bryon Ross and others), 2022-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/airbnb-engineering/rebuilding-payment-orchestration-at-airbnb-341d194a781b</span></li>
+<li id="ref-shopify-flash-sale-talk-2022"><a href="https://www.infoq.com/presentations/shopify-architecture-flash-sale/">Shopify's Architecture to Handle the World's Biggest Flash Sales (QCon Plus May 2022, transcript)</a>. InfoQ (speaker Bart de Water, Shopify Payments), 2022-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/shopify-architecture-flash-sale/</span></li>
+<li id="ref-revolut-xt25-slides-2025"><a href="https://www.juxt.pro/xt25/donato-lucia.pdf">Taming Complexity in Distributed Systems: What's behind Revolut success, XT25 slide deck (Donato Lucia, Partner and Head of Technology; 28 slides, copyright 2025 Revolut)</a>. Revolut (hosted by JUXT), 2025. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.juxt.pro/xt25/donato-lucia.pdf</span></li>
+<li id="ref-revolut-devops-qcon-2025"><a href="https://www.infoq.com/presentations/revolut-devops-automation">Extreme DevOps Automation, QCon London 2025 transcript (Sergio Amorim, DevOps Platform Developer Experience lead)</a>. InfoQ, 2025-08. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/revolut-devops-automation</span></li>
+<li id="ref-starling-engine-gcp-job-2026"><a href="https://jobs.workable.com/jobs/37422d5f-3238-4ed3-bcce-ef8ff8fd9b40.md">Staff Infrastructure Engineer (GCP) - Engine by Starling (job listing, undated, accessed 2026-11)</a>. Starling Bank via Workable, 2026. <span class="ev ev-medium">Medium</span> <span class="print-url">https://jobs.workable.com/jobs/37422d5f-3238-4ed3-bcce-ef8ff8fd9b40.md</span></li>
+<li id="ref-wise-tw-tasks-executor-2025"><a href="https://github.com/transferwise/tw-tasks-executor">transferwise/tw-tasks-executor README and docs (created 2019-05, archived 2025-11)</a>. Wise (GitHub), 2025-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/transferwise/tw-tasks-executor</span></li>
+<li id="ref-wise-vendor-switching-2026"><a href="https://medium.com/wise-engineering/from-onboarding-to-production-how-i-built-dynamic-vendor-switching-at-wise-876942d6031f">From Onboarding to Production: How I Built Dynamic Vendor Switching at Wise; read via the publication's RSS feed</a>. Wise Engineering (Medium), 2026-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/wise-engineering/from-onboarding-to-production-how-i-built-dynamic-vendor-switching-at-wise-876942d6031f</span></li>
+<li id="ref-ant-group-unitization-2026"><a href="https://help.aliyun.com/en/document_detail/2806106.html">From unitization to elastic architecture: Handling explosive traffic spikes on the Internet (SOFAStack docs)</a>. Alibaba Cloud / Ant Group, 2026-03 (last updated; original date not shown). <span class="ev ev-strong">Strong</span> <span class="print-url">https://help.aliyun.com/en/document_detail/2806106.html</span></li>
+<li id="ref-ant-group-seata-tcc-2019"><a href="https://seata.apache.org/blog/tcc-mode-applicable-scenario-analysis/">Analysis of Applicable Models and Scenarios for TCC (English machine translation; older than 5 years)</a>. Apache Seata blog, author zhangthen (Ant Financial team), 2019-03. <span class="ev ev-medium">Medium</span> <span class="print-url">https://seata.apache.org/blog/tcc-mode-applicable-scenario-analysis/</span></li>
+<li id="ref-ant-group-oceanbase-history-2025"><a href="https://github.com/oceanbase/oceanbase-doc/blob/V4.3.5/en-US/700.reference/100.oceanbase-database-concepts/200.history-of-oceanbase.md">Development of OceanBase Database (official docs, V4.3.5)</a>. OceanBase, 2025-01. <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/oceanbase/oceanbase-doc/blob/V4.3.5/en-US/700.reference/100.oceanbase-database-concepts/200.history-of-oceanbase.md</span></li>
+<li id="ref-capital-one-10k-2023"><a href="https://www.sec.gov/Archives/edgar/data/927628/000092762824000094/cof-20231231.htm">Form 10-K for fiscal year 2023 (Technology and Intellectual Property, Technology/Systems)</a>. Capital One via SEC EDGAR, 2024-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.sec.gov/Archives/edgar/data/927628/000092762824000094/cof-20231231.htm</span></li>
+<li id="ref-capital-one-serverless-transactions-2017"><a href="https://www.capitalone.com/tech/cloud/serverless-transactions-serve-customers/">Fintech: How serverless transactions better serve customers</a>. Capital One Tech, 2017-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.capitalone.com/tech/cloud/serverless-transactions-serve-customers/</span></li>
+<li id="ref-capital-one-cloud-migration-2024"><a href="https://capitalonesoftware.com/blog/cloud-migration-journey">How Capital One migrated to the cloud: Lessons from an 8-year journey</a>. Capital One Software blog, 2024-05. <span class="ev ev-strong">Strong</span> <span class="print-url">https://capitalonesoftware.com/blog/cloud-migration-journey</span></li>
+<li id="ref-paypal-hera-talk-2019"><a href="https://www.infoq.com/presentations/paypal-scale-db/">Scaling DB Access for Billions of Queries Per Day @PayPal (QCon New York 2019, InfoQ transcript)</a>. InfoQ (speakers Petrica Voicu and Kenneth Kang, PayPal), 2019-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/paypal-scale-db/</span></li>
+<li id="ref-goldman-sachs-reladomo-repo-2016"><a href="https://github.com/goldmansachs/reladomo">goldmansachs/reladomo repository and README</a>. Goldman Sachs (GitHub), 2016-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/goldmansachs/reladomo</span></li>
+<li id="ref-ant-group-java-guidelines-en-2022"><a href="https://github.com/alibaba/Alibaba-Java-Coding-Guidelines">Alibaba Java Coding Guidelines (English translation of an earlier edition)</a>. Alibaba Group, 2022-02 (last commit). <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/alibaba/Alibaba-Java-Coding-Guidelines</span></li>
+<li id="ref-block-misk-repo-2026"><a href="https://github.com/cashapp/misk">cashapp/misk (README, module list, misk-jooq, misk-vitess and misk-spirit READMEs)</a>. Cash App (GitHub), 2026-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/cashapp/misk</span></li>
+<li id="ref-n26-tech-stack-2022"><a href="https://medium.com/insiden26/engineering-at-n26-a-tour-of-our-tech-stack-and-architecture-9e58ce96f889">Engineering at N26: a Tour of our Tech Stack and Architecture (Rafael Roman); read via the publication's RSS feed because the article page returned 403</a>. N26 (InsideN26 on Medium), 2022-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/insiden26/engineering-at-n26-a-tour-of-our-tech-stack-and-architecture-9e58ce96f889</span></li>
+<li id="ref-nubank-f1-2021"><a href="https://www.sec.gov/Archives/edgar/data/1691493/000119312521314359/d213207df1.htm">Nu Holdings Ltd. Form F-1 registration statement (Business, Risk Factors, Letter from founders)</a>. Nu Holdings / SEC EDGAR, 2021-11-01 (older than 5 years). <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.sec.gov/Archives/edgar/data/1691493/000119312521314359/d213207df1.htm</span></li>
+<li id="ref-monzo-migrations-2800-services-2024"><a href="https://monzo.com/blog/how-we-run-migrations-across-2800-microservices">How we run migrations across 2,800 microservices (Will Sewell)</a>. Monzo, 2024-08. <span class="ev ev-strong">Strong</span> <span class="print-url">https://monzo.com/blog/how-we-run-migrations-across-2800-microservices</span></li>
+<li id="ref-uber-arm-2025"><a href="https://www.uber.com/blog/adopting-arm-at-scale-transitioning-to-a-multi-architecture-environment/">Adopting Arm at Scale: Transitioning to a Multi-Architecture Environment</a>. Uber Engineering Blog, 2025-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/adopting-arm-at-scale-transitioning-to-a-multi-architecture-environment/</span></li>
+<li id="ref-robinhood-ceres-derivatives-2026"><a href="https://robinhood.com/us/en/careers/blog/how-we-evolved-robinhoods-derivatives-platform-for-a-new-market-in-under-three-weeks/">How we evolved Robinhood's derivatives platform for a new market in under three weeks (Edmond Wong)</a>. Robinhood Careers Blog, 2026-06-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://robinhood.com/us/en/careers/blog/how-we-evolved-robinhoods-derivatives-platform-for-a-new-market-in-under-three-weeks/</span></li>
+<li id="ref-stripe-sorbet-2022"><a href="https://stripe.dev/blog/sorbet-stripes-type-checker-for-ruby">Sorbet: Stripe's type checker for Ruby</a>. Stripe (stripe.dev, Jake Zimmerman), 2022-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.dev/blog/sorbet-stripes-type-checker-for-ruby</span></li>
+<li id="ref-chime-rails-foundation-2025"><a href="https://rubyonrails.org/2025/7/15/chime-joins-foundation-contributing-member">Chime joins the Rails Foundation as a Contributing Member (quotes Chime co-founder Ryan King)</a>. Rails Foundation, 2025-07-15. <span class="ev ev-medium">Medium</span> <span class="print-url">https://rubyonrails.org/2025/7/15/chime-joins-foundation-contributing-member</span></li>
+<li id="ref-coinbase-mongobetween-repo-nd"><a href="https://github.com/coinbase/mongobetween">coinbase/mongobetween: MongoDB connection pooler (README)</a>. GitHub (Coinbase), undated (accessed 2026-11). <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/coinbase/mongobetween</span></li>
+<li id="ref-nubank-cavalcanti-podcast-2021"><a href="https://www.infoq.com/podcasts/lucas-cavalcanti-nubank-fintech-clojure/">Lucas Cavalcanti on Nubank's architecture, Clojure and Datomic (InfoQ Podcast)</a>. InfoQ, 2021-08-16 (older than 5 years). <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/podcasts/lucas-cavalcanti-nubank-fintech-clojure/</span></li>
+<li id="ref-robinhood-sed-podcast-2020"><a href="https://softwareengineeringdaily.com/wp-content/uploads/2020/09/SED1136-Robinhood-Engineering.pdf">SED 1136: Robinhood Engineering with Jaren Glover (transcript)</a>. Software Engineering Daily, 2020 (older than 5 years). <span class="ev ev-strong">Strong</span> <span class="print-url">https://softwareengineeringdaily.com/wp-content/uploads/2020/09/SED1136-Robinhood-Engineering.pdf</span></li>
+<li id="ref-monzo-1500-microservices-2020"><a href="https://www.infoq.com/presentations/monzo-microservices">Modern Banking in 1500 Microservices, QCon London 2020 (Matt Heath, Suhail Patel)</a>. InfoQ, 2020. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/presentations/monzo-microservices</span></li>
+<li id="ref-adyen-sql-comments-2023"><a href="https://www.adyen.com/knowledge-hub/injecting-metadata-as-comments">Injecting metadata as comments in SQL queries</a>. Adyen (Cosmin Octavian Pene), 2023-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.adyen.com/knowledge-hub/injecting-metadata-as-comments</span></li>
+<li id="ref-adyen-pgconf-100tb-2025"><a href="https://www.postgresql.eu/events/pgconfeu2025/schedule/session/6817-operational-hazards-of-managing-postgresql-dbs-over-100tb/">Operational hazards of managing PostgreSQL DBs over 100TB (PGConf.EU 2025 abstract and slides)</a>. PostgreSQL Europe (speaker Teresa Lopes, Adyen), 2025-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.postgresql.eu/events/pgconfeu2025/schedule/session/6817-operational-hazards-of-managing-postgresql-dbs-over-100tb/</span></li>
+<li id="ref-paypal-oracle-sharding-2017"><a href="https://www.oracle.com/tw/a/ocom/docs/sharding-paypal-3610614.pdf">Oracle Database Native Sharding: a Customer Perspective (slides by John Kanagaraj, PayPal Core Data Platform)</a>. Oracle (vendor-hosted PDF), 2017-02. <span class="ev ev-medium">Medium</span> <span class="print-url">https://www.oracle.com/tw/a/ocom/docs/sharding-paypal-3610614.pdf</span></li>
+<li id="ref-paypal-two-clouds-2026"><a href="https://developer.paypal.com/community/blog/one_codebase_two_clouds">One Codebase, Two Clouds</a>. PayPal Developer Blog (Mounika Gampa), 2026-07. <span class="ev ev-strong">Strong</span> <span class="print-url">https://developer.paypal.com/community/blog/one_codebase_two_clouds</span></li>
+<li id="ref-revolut-jooq-plugin-2026"><a href="https://github.com/revolut-engineering/jooq-plugin">revolut-engineering/jooq-plugin: Gradle plugin for generating jOOQ classes using dockerized databases (created 2019-05, last commit 2026-02)</a>. Revolut (GitHub), 2026-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/revolut-engineering/jooq-plugin</span></li>
+<li id="ref-robinhood-brokerage-sharding-2021"><a href="https://robinhood.com/us/en/newsroom/how-we-scaled-robinhoods-brokerage-system-for-greater-reliability/">How we scaled Robinhood's brokerage system for greater reliability (Edmond Wong, Nathan Ziebart)</a>. Robinhood Newsroom, 2021-06-25 (older than 5 years). <span class="ev ev-strong">Strong</span> <span class="print-url">https://robinhood.com/us/en/newsroom/how-we-scaled-robinhoods-brokerage-system-for-greater-reliability/</span></li>
+<li id="ref-chime-10k-2026"><a href="https://www.sec.gov/Archives/edgar/data/1795586/000179558626000013/chym-20251231.htm">Chime Financial, Inc. Form 10-K for fiscal year 2025</a>. Chime / SEC EDGAR, 2026-03-06. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.sec.gov/Archives/edgar/data/1795586/000179558626000013/chym-20251231.htm</span></li>
+<li id="ref-goldman-sachs-reladomo-infoq-2017"><a href="https://www.infoq.com/articles/Reladomo-Open-Source-ORM">Introducing Reladomo - Enterprise Open Source Java ORM, Batteries Included! (Mohammad Rezaei)</a>. InfoQ, 2017-03. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/articles/Reladomo-Open-Source-ORM</span></li>
+<li id="ref-goldman-sachs-reladomo-infoq-part2-2017"><a href="https://www.infoq.com/articles/Reladomo-Open-Source-ORM-Part2">Introducing Reladomo - Enterprise Open Source Java ORM, Batteries Included! (Part 2)</a>. InfoQ, 2017-06. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.infoq.com/articles/Reladomo-Open-Source-ORM-Part2</span></li>
+<li id="ref-ing-temenos-belgium-nd"><a href="https://www.temenos.com/?p=5915">ING Belgium Success Story</a>. Temenos, n.d. <span class="ev ev-medium">Medium</span> <span class="print-url">https://www.temenos.com/?p=5915</span></li>
+<li id="ref-ing-kafka-summit-2018"><a href="https://www.confluent.io/kafka-summit-london18/the-evolution-of-kafka-at-ing-bank">The Evolution of Kafka at ING Bank (Timor Timuri, Richard Bras)</a>. Confluent (Kafka Summit London 2018), 2018. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.confluent.io/kafka-summit-london18/the-evolution-of-kafka-at-ing-bank</span></li>
+<li id="ref-bbva-elastic-nd"><a href="https://www.elastic.co/customers/bbva">BBVA transforms global banking operations with Elasticsearch</a>. Elastic, n.d. <span class="ev ev-medium">Medium</span> <span class="print-url">https://www.elastic.co/customers/bbva</span></li>
+<li id="ref-shopify-shop-vitess-2024"><a href="https://shopify.engineering/horizontally-scaling-the-rails-backend-of-shop-app-with-vitess">Horizontally scaling the Rails backend of Shop app with Vitess</a>. Shopify Engineering (Hammad Khalid et al.), 2024-01. <span class="ev ev-strong">Strong</span> <span class="print-url">https://shopify.engineering/horizontally-scaling-the-rails-backend-of-shop-app-with-vitess</span></li>
+<li id="ref-zalando-sprocwrapper-talk-2012"><a href="https://postgresql.eu/events/pgconfeu2012/schedule/session/323-java-wrapper-for-postgresql-stored-procedures">Java Wrapper for PostgreSQL Stored Procedures (Jan Mussler, PGConf.EU 2012 session abstract)</a>. PostgreSQL Europe, 2012-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://postgresql.eu/events/pgconfeu2012/schedule/session/323-java-wrapper-for-postgresql-stored-procedures</span></li>
+<li id="ref-monzo-balances-2022"><a href="https://monzo.com/blog/2022/02/18/how-we-calculate-balances">How we calculate balances (Basma Taha)</a>. Monzo, 2022-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://monzo.com/blog/2022/02/18/how-we-calculate-balances</span></li>
+<li id="ref-ant-group-dtx-benefits-2026"><a href="https://help.aliyun.com/en/document_detail/132904.html">Benefits of distributed transaction (SOFAStack DTX docs)</a>. Alibaba Cloud / Ant Group, 2026-01 (last updated). <span class="ev ev-strong">Strong</span> <span class="print-url">https://help.aliyun.com/en/document_detail/132904.html</span></li>
+<li id="ref-adyen-partitioning-2023"><a href="https://www.adyen.com/knowledge-hub/partitioning-at-adyen">A Deep Dive into Table partitioning Part 2: Partitioning at Adyen</a>. Adyen (Derk van Veen and Cosmin Octavian Pene), 2023-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.adyen.com/knowledge-hub/partitioning-at-adyen</span></li>
+<li id="ref-nubank-10-years-2025"><a href="https://building.nu.com/10-years-of-engineering-at-nubank-lessons-from-scaling-to-110-million-customers">10 years of engineering at Nubank: Lessons from scaling to 122+ million customers</a>. Building Nubank, 2025-08-20. <span class="ev ev-strong">Strong</span> <span class="print-url">https://building.nu.com/10-years-of-engineering-at-nubank-lessons-from-scaling-to-110-million-customers</span></li>
+<li id="ref-shopify-composite-pk-2020"><a href="https://shopify.engineering/how-to-introduce-composite-primary-keys-in-rails">How to Introduce Composite Primary Keys in Rails (2020)</a>. Shopify Engineering (John Arthorne), 2020-10. <span class="ev ev-strong">Strong</span> <span class="print-url">https://shopify.engineering/how-to-introduce-composite-primary-keys-in-rails</span></li>
+<li id="ref-block-job-cash-banking-2026"><a href="http://block.xyz/careers/jobs/5196196008?gh_jid=5196196008">Staff Software Engineer, Cash App Banking, job listing</a>. Block, 2026-11. <span class="ev ev-medium">Medium</span> <span class="print-url">http://block.xyz/careers/jobs/5196196008?gh_jid=5196196008</span></li>
+<li id="ref-block-job-cash-taxes-2026"><a href="http://block.xyz/careers/jobs/5207134008?gh_jid=5207134008">Senior Software Engineer, Cash App Taxes, job listing</a>. Block, 2026-11. <span class="ev ev-medium">Medium</span> <span class="print-url">http://block.xyz/careers/jobs/5207134008?gh_jid=5207134008</span></li>
+<li id="ref-zalando-postgresql-pgconfru-2015"><a href="https://pgconf.ru/rmedia/2015c/klyukin.pdf">Enabling development teams to move fast: PostgreSQL at Zalando (Valentine Gogichashvili and Oleksii Kliukin, PGConf.RU slides)</a>. PGConf.RU, 2015. <span class="ev ev-strong">Strong</span> <span class="print-url">https://pgconf.ru/rmedia/2015c/klyukin.pdf</span></li>
+<li id="ref-zalando-data-integration-2015"><a href="https://engineering.zalando.com/posts/2015/09/data-integration-in-a-world-of-microservices.html">Data Integration in a World of Microservices</a>. Zalando Engineering Blog, 2015-09. <span class="ev ev-strong">Strong</span> <span class="print-url">https://engineering.zalando.com/posts/2015/09/data-integration-in-a-world-of-microservices.html</span></li>
+<li id="ref-ant-group-oceanbase-vldb-2022"><a href="https://www.vldb.org/pvldb/vol15/p3385-xu.pdf">OceanBase: A 707 Million tpmC Distributed Relational Database System (PVLDB 15(12))</a>. OceanBase (Ant Group), VLDB Endowment, 2022. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.vldb.org/pvldb/vol15/p3385-xu.pdf</span></li>
+<li id="ref-nubank-data-privacy-2024"><a href="https://building.nu.com/software-driven-data-privacy-an-innovative-project-journey/">Software-driven data privacy: an innovative project journey</a>. Building Nubank, 2024-04-22. <span class="ev ev-strong">Strong</span> <span class="print-url">https://building.nu.com/software-driven-data-privacy-an-innovative-project-journey/</span></li>
+<li id="ref-shopify-modular-monolith-2019"><a href="https://shopify.engineering/deconstructing-monolith-designing-software-maximizes-developer-productivity">Deconstructing the Monolith: Designing Software that Maximizes Developer Productivity (2019)</a>. Shopify Engineering (Kirsten Westeinde), 2019-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://shopify.engineering/deconstructing-monolith-designing-software-maximizes-developer-productivity</span></li>
+<li id="ref-airbnb-rails-payments-2015"><a href="https://medium.com/airbnb-engineering/large-scale-payments-systems-and-ruby-on-rails-bfe5b89f6f4">Large Scale Payments Systems and Ruby on Rails</a>. Airbnb Tech Blog (Michel Weksler; first published on nerds.airbnb.com 2015-02-26, reposted on Medium 2016-03-04), 2015-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://medium.com/airbnb-engineering/large-scale-payments-systems-and-ruby-on-rails-bfe5b89f6f4</span></li>
+<li id="ref-shopify-graphql-idempotency-2019"><a href="https://shopify.engineering/building-resilient-graphql-apis-using-idempotency">Building Resilient GraphQL APIs Using Idempotency (2019)</a>. Shopify Engineering (Todd Jefferson), 2019-08. <span class="ev ev-strong">Strong</span> <span class="print-url">https://shopify.engineering/building-resilient-graphql-apis-using-idempotency</span></li>
+<li id="ref-wise-idempotence4j-2026"><a href="https://github.com/transferwise/idempotence4j">transferwise/idempotence4j README (created 2020-05, release 2.0.0 in 2026-05)</a>. Wise (GitHub), 2026-05. <span class="ev ev-strong">Strong</span> <span class="print-url">https://github.com/transferwise/idempotence4j</span></li>
+<li id="ref-stripe-online-migrations-2017"><a href="https://stripe.com/blog/online-migrations">Online migrations at scale</a>. Stripe (Jacqueline Xu), 2017-02. <span class="ev ev-strong">Strong</span> <span class="print-url">https://stripe.com/blog/online-migrations</span></li>
+<li id="ref-uber-docstore-ledger-migration-2021"><a href="https://www.uber.com/blog/dynamodb-to-docstore-migration/">How Uber Migrated Financial Data from DynamoDB to Docstore (2021, older than 5 years)</a>. Uber Engineering Blog, 2021-11. <span class="ev ev-strong">Strong</span> <span class="print-url">https://www.uber.com/blog/dynamodb-to-docstore-migration/</span></li>
+</ol>
+<p class="note">Every source consulted, including those not cited above, is listed on the <a href="https://marisha-sahay.github.io/fintech-stack-report/sources.html">sources page</a>.</p></section>
+</main>
+</body>
+</html>

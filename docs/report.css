@@ -1,0 +1,160 @@
+/* Report styles: screen (GitHub Pages) and print (PDF via headless Chrome). */
+
+:root {
+  --bg: #ffffff;
+  --ink: #17202a;
+  --muted: #5a6573;
+  --rule: #e2e6eb;
+  --band: #f5f7f9;
+  --accent: #1f5f99;
+  --code-bg: #eef1f4;
+  --strong: #2f7d4f;
+  --medium: #9a6a00;
+  --weak: #a33b3b;
+  --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --sans: "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161b;
+    --ink: #e6e9ed;
+    --muted: #9aa5b1;
+    --rule: #2a313a;
+    --band: #181d23;
+    --accent: #7db3e8;
+    --code-bg: #20262e;
+    --strong: #6cc193;
+    --medium: #e0b04a;
+    --weak: #e58a8a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161b;
+  --ink: #e6e9ed;
+  --muted: #9aa5b1;
+  --rule: #2a313a;
+  --band: #181d23;
+  --accent: #7db3e8;
+  --code-bg: #20262e;
+  --strong: #6cc193;
+  --medium: #e0b04a;
+  --weak: #e58a8a;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.6;
+}
+.page { max-width: 46rem; margin: 0 auto; padding: 3rem 16px 5rem; }
+
+h1, h2, h3, h4 { font-family: var(--sans); line-height: 1.25; letter-spacing: -0.01em; }
+h1 { font-size: 2.4rem; margin: 0.2rem 0 0.6rem; }
+h2 { font-size: 1.5rem; margin: 2.6rem 0 0.8rem; padding-top: 0.4rem; border-top: 1px solid var(--rule); }
+h3 { font-size: 1.15rem; margin: 1.8rem 0 0.5rem; }
+p, ul, ol { margin: 0 0 1rem; }
+a { color: var(--accent); text-underline-offset: 2px; }
+code { font-family: var(--mono); font-size: 0.85em; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+blockquote { margin: 1.2rem 0; padding: 0.2rem 1rem; border-left: 3px solid var(--accent); color: var(--muted); }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
+
+/* cover */
+.cover .kicker { font-family: var(--sans); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); margin: 0; }
+.cover .kicker a { text-decoration: none; }
+.cover .subtitle { font-size: 1.2rem; color: var(--muted); margin-bottom: 0.8rem; }
+.cover .byline, .cover .links { font-family: var(--sans); font-size: 0.9rem; color: var(--muted); margin: 0.2rem 0; }
+.toc { margin: 1.8rem 0 0; padding: 1rem 1.2rem; background: var(--band); border-radius: 8px; font-family: var(--sans); font-size: 0.92rem; }
+.toc .toc-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); border: 0; margin: 0 0 0.4rem; padding: 0; }
+.toc ol { margin: 0; padding-left: 1.3rem; }
+.toc a { text-decoration: none; }
+
+/* tables */
+table { width: 100%; border-collapse: collapse; font-family: var(--sans); font-size: 0.82rem; line-height: 1.4; margin: 1rem 0 1.4rem; }
+th { text-align: left; font-weight: 600; border-bottom: 2px solid var(--ink); padding: 0.45rem 0.5rem; vertical-align: bottom; }
+td { border-bottom: 1px solid var(--rule); padding: 0.45rem 0.5rem; vertical-align: top; }
+tbody tr:nth-child(even) td { background: var(--band); }
+.table-wrap, .matrix { overflow-x: auto; }
+.matrix table { font-size: 0.74rem; min-width: 44rem; }
+
+/* citations and evidence */
+sup.cite { font-family: var(--sans); font-size: 0.65em; line-height: 0; }
+sup.cite a { text-decoration: none; }
+.cite-missing { color: var(--weak); font-weight: 700; }
+.ev { font-family: var(--sans); font-size: 0.72rem; font-weight: 600; padding: 0.05rem 0.4rem; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.ev-strong { color: var(--strong); }
+.ev-medium { color: var(--medium); }
+.ev-weak { color: var(--weak); }
+.references ol { font-size: 0.85rem; line-height: 1.45; padding-left: 1.6rem; }
+.references li { margin-bottom: 0.4rem; }
+.references .note { font-size: 0.85rem; color: var(--muted); }
+.print-url { display: none; }
+
+/* diagrams: inline SVG inside <div class="diagram">, themed by the tokens above */
+.diagram { margin: 1.2rem 0 0.6rem; }
+.diagram svg { display: block; width: 100%; height: auto; }
+.diagram .caption { font-family: var(--sans); font-size: 0.78rem; color: var(--muted); margin: 0.4rem 0 1rem; }
+.dg-box { fill: var(--band); stroke: var(--rule); stroke-width: 1.2; }
+.dg-core { stroke: var(--accent); stroke-width: 1.8; }
+.dg-ext { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; }
+.dg-title { font-family: var(--sans); font-size: 13px; font-weight: 600; fill: var(--ink); }
+.dg-sub { font-family: var(--sans); font-size: 10.5px; fill: var(--muted); }
+.dg-label { font-family: var(--sans); font-size: 10px; fill: var(--muted); font-style: italic; }
+.dg-line { stroke: var(--muted); stroke-width: 1.3; fill: none; }
+.dg-head { fill: var(--muted); }
+
+/* callouts: wrap markdown in <div class="finding"> ... </div> */
+.finding { border-left: 3px solid var(--accent); background: var(--band); padding: 0.8rem 1rem; margin: 1.2rem 0; border-radius: 0 6px 6px 0; }
+.finding p:last-child { margin-bottom: 0; }
+
+@media (max-width: 600px) {
+  body { font-size: 17px; }
+  h1 { font-size: 1.9rem; }
+  .page { padding-top: 2rem; }
+}
+
+/* ---------- print / PDF ---------- */
+@page {
+  size: Letter;
+  margin: 15mm 15mm 17mm;
+  @bottom-center { content: counter(page) " / " counter(pages); font-family: "Inter", Arial, sans-serif; font-size: 8pt; color: #5a6573; }
+}
+@page :first { @bottom-center { content: none; } }
+
+@media print {
+  :root {
+    --bg: #ffffff; --ink: #17202a; --muted: #5a6573; --rule: #dde2e7; --band: #f4f6f8;
+    --accent: #1f5f99; --code-bg: #eef1f4; --strong: #2f7d4f; --medium: #8a5f00; --weak: #a33b3b;
+  }
+  body { font-size: 9.6pt; line-height: 1.42; }
+  .page { max-width: none; padding: 0; }
+  .screen-only { display: none; }
+  h1 { font-size: 22pt; }
+  .cover .subtitle { font-size: 12pt; margin-bottom: 4pt; }
+  h2 { font-size: 13.5pt; margin: 14pt 0 6pt; padding-top: 4pt; break-after: avoid; }
+  h3 { font-size: 10.5pt; margin: 10pt 0 4pt; break-after: avoid; }
+  p, ul, ol { margin: 0 0 6pt; }
+  li { margin-bottom: 2pt; }
+  li > p { margin-bottom: 3pt; }
+  table { font-size: 7.6pt; margin: 6pt 0 8pt; }
+  th, td { padding: 3pt 4pt; }
+  .matrix table { font-size: 6.8pt; min-width: 0; }
+  .matrix th, .matrix td { padding: 2.5pt 3pt; }
+  .finding { padding: 6pt 9pt; margin: 8pt 0; }
+  tr, .finding, blockquote, .diagram { break-inside: avoid; }
+  .diagram svg { max-height: 118mm; }
+  .toc { columns: 2; column-gap: 2rem; font-size: 8.5pt; padding: 8pt 12pt; margin-top: 10pt; }
+  .toc ol li { break-inside: avoid; margin-bottom: 0; }
+  a { color: inherit; text-decoration: none; }
+  sup.cite a { color: var(--accent); }
+  .references { break-before: page; }
+  .references ol { font-size: 7pt; line-height: 1.3; columns: 2; column-gap: 14pt; }
+  .references li { break-inside: avoid; margin-bottom: 2.5pt; }
+  .references .ev { font-size: 6pt; padding: 0 3pt; }
+}

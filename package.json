@@ -1,0 +1,15 @@
+{
+  "name": "fintech-stack-report",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Source-graded research report on how banks and fintechs build their systems, and the reasons they give.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:html": "node scripts/build.mjs --no-pdf",
+    "matrix": "node scripts/matrix.mjs"
+  },
+  "dependencies": {
+    "marked": "15.0.12"
+  }
+}

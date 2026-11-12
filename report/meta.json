@@ -1,0 +1,11 @@
+{
+  "kicker": "System design research report",
+  "title": "Designing Systems That Move Money",
+  "subtitle": "Design trade-offs from 24 fintechs, banks and platforms, for principal engineers and architects",
+  "author": "Marisha Sahay",
+  "date": "November 2026 (draft)",
+  "version": "0.3",
+  "description": "A source-graded review of the system architecture and design trade-offs behind money-moving systems at 24 fintechs, banks and platforms, for principal engineers and architects.",
+  "pdf": "fintech-stack-report.pdf",
+  "site_url": "https://marisha-sahay.github.io/fintech-stack-report/"
+}
